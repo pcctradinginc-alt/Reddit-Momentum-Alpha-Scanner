@@ -1,0 +1,64 @@
+# Four strategies, separately configurable and separately backtested.
+# Each defines which gates it leans on and its hold/exit profile.
+
+strategies:
+  A_early_momentum_long:
+    enabled: true
+    description: "Early Reddit Momentum Long — stock/ETF, 1-10 day hold."
+    instrument: equity
+    direction: long
+    hold_days: [1, 10]
+    requires:
+      discovery_green: true
+      tradeability_green: true
+      timing_green: true
+    entry_triggers: [breakout_20d, pullback_vwap, opening_range_breakout]
+    weight: 1.0
+
+  B_squeeze_watch:
+    enabled: true
+    description: "Reddit Squeeze — high short interest, small/mid float, call flow, breakout."
+    instrument: equity_or_call_spread
+    direction: long
+    hold_days: [1, 8]
+    requires:
+      discovery_green: true
+      tradeability_green: true
+      timing_green: true
+    filters:
+      min_short_interest_pct: 15
+      max_float_shares: 150_000_000
+      require_call_imbalance: true
+    entry_triggers: [breakout_20d, squeeze_ignition]
+    weight: 0.8
+
+  C_post_earnings_drift:
+    enabled: true
+    description: "Post-Earnings Reddit Drift — earnings/guidance + price strength + nascent reddit attention."
+    instrument: equity
+    direction: long
+    hold_days: [2, 10]
+    requires:
+      discovery_green: true
+      tradeability_green: true
+      timing_green: true
+    filters:
+      max_days_since_earnings: 5
+      require_positive_reaction: true
+    entry_triggers: [post_earnings_drift, pullback_vwap]
+    weight: 0.9
+
+  D_blowoff_fade:
+    enabled: true
+    description: "Blow-Off Avoid/Fade — primarily a LONG blocker; optional small defined-risk fade."
+    instrument: equity_or_put_spread
+    direction: short
+    role: blocker                # main job: veto overheated longs
+    allow_counter_trade: false   # opt-in only; default off
+    hold_days: [1, 5]
+    triggers:
+      parabolic_5d_pct: 60
+      iv_explosion_rank: 90
+      reddit_decay_while_price_up: true
+      mainstream_coverage: true
+    weight: 0.3

@@ -1,0 +1,120 @@
+# =====================================================================
+#  RMAS master config — all gates/thresholds/weights are tunable here.
+#  Philosophy: optimize EV-after-cost, not hit-rate. Few high-quality
+#  setups. A signal only becomes an alert when ALL three gates are green.
+# =====================================================================
+
+run:
+  timezone: "America/New_York"
+  max_alerts_per_day: 3          # ranking, not overtrading
+  offline_default: true          # adapters fall back to synthetic/cached data
+
+# ---- Universe / ingestion ----
+universe:
+  subreddits:
+    - wallstreetbets
+    - stocks
+    - StockMarket
+    - options
+    - smallstreetbets
+    - pennystocks
+    - Shortsqueeze
+  lookback_short_days: 7
+  lookback_long_days: 30
+  min_market_cap_usd: 150_000_000
+  min_dollar_volume_usd: 5_000_000
+
+# ---- Discovery gate (Reddit = radar) ----
+discovery:
+  weights:                       # combined into 0..1 discovery score
+    mention_z_7d: 0.22
+    mention_z_30d: 0.18
+    mention_acceleration: 0.20
+    new_threads_per_hour_z: 0.10
+    comments_per_hour_z: 0.08
+    unique_authors_z: 0.10
+    author_growth: 0.07
+    subreddit_diversity: 0.05
+  gate:
+    min_score: 0.60
+    min_mention_z_7d: 1.5        # "unusually discussed"
+    min_unique_authors: 5
+    max_bot_ratio: 0.45          # reject astroturf
+    require_early: true          # prefer rising-but-not-yet-mainstream
+
+# ---- Tradeability gate (price/volume/options confirmation) ----
+tradeability:
+  weights:
+    rel_strength_vs_spy: 0.18
+    rel_strength_vs_sector: 0.12
+    breakout_20d: 0.16
+    above_vwap: 0.10
+    above_ema20: 0.08
+    rel_volume: 0.16
+    premarket_volume_z: 0.08
+    options_call_imbalance: 0.12
+  gate:
+    min_score: 0.55
+    require_rel_strength_positive: true
+    max_bid_ask_spread_bps: 60       # reject illiquid
+    min_rel_volume: 1.5
+    max_iv_rank: 92                   # reject extreme IV overpricing
+    max_iv_percentile: 95
+
+# ---- Timing / Risk gate ----
+timing_risk:
+  weights:
+    entry_trigger: 0.40          # breakout / pullback-to-VWAP / ORB / drift / squeeze
+    not_overheated: 0.35         # FOMO / blow-off filter (higher = calmer)
+    attention_intact: 0.25       # reddit growth still alive
+  gate:
+    min_score: 0.55
+    max_intraday_gap_pct: 12     # block extreme gaps
+    max_parabolic_5d_pct: 60     # block parabolic moves
+    block_if_mainstream: true    # broad media coverage = late
+    require_attention_not_decaying: true
+
+# ---- Cross-source attention ----
+cross_source:
+  prefer_divergence: true        # reddit-early, others-quiet = good
+  penalize_broad_euphoria: true  # everyone screaming at once = late
+
+# ---- Regime filter ----
+regime:
+  vix_risk_off_above: 28
+  vix_calm_below: 16
+  block_new_longs_in_momentum_crash: true
+  scale_size_by_regime: true
+
+# ---- Costs (realistic) ----
+costs:
+  equity_commission_per_share: 0.0
+  equity_slippage_bps: 8
+  options_commission_per_contract: 0.65
+  options_slippage_mid_pct: 0.25   # fraction of bid-ask paid vs mid
+  iv_crush_haircut_pct: 0.20       # applied to option entry near catalysts
+
+# ---- Risk / sizing ----
+risk:
+  account_equity_usd: 100_000
+  risk_per_trade_pct: 0.75         # % of equity risked at stop
+  max_daily_loss_pct: 2.0
+  max_concurrent_trades: 4
+  max_sector_exposure_pct: 35
+  max_meme_exposure_pct: 25
+  atr_stop_mult: 2.0
+  time_stop_days_min: 2
+  time_stop_days_max: 10
+  trailing_stop_atr_mult: 2.5
+  partial_take_r_multiple: 1.5
+
+# ---- Meta-labeling ----
+meta_labeling:
+  enabled: true
+  min_trade_probability: 0.55      # 2nd model: trade only if P(win-after-cost) high enough
+
+# ---- Backtest ----
+backtest:
+  walk_forward_train_days: 180
+  walk_forward_test_days: 45
+  point_in_time: true              # enforce no-lookahead

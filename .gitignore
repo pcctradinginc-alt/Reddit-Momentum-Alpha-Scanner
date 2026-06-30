@@ -1,0 +1,52 @@
+# --- Secrets: NEVER commit real keys ---
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+credentials.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# --- Caches / data (point-in-time data is large & local) ---
+data/cache/
+data/raw/
+data/interim/
+*.parquet
+*.feather
+*.sqlite
+*.db
+
+# --- Tooling ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- Logs / reports (keep dir, ignore contents) ---
+logs/*.log
+reports/*.html
+reports/*.json
+reports/*.txt
+data/paper_blotter.json
+!**/.gitkeep
+
+# --- Claude Code session state (hooks/goal/settings) ---
+.claude/
+
+# --- OS / IDE ---
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rmas"
+version = "0.1.0"
+description = "Reddit + Momentum Alpha Scanner — early retail-attention discovery, confirmed by price/volume/options flow, filtered for FOMO/pump risk."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "pcctradinginc" }]
+keywords = ["trading", "reddit", "momentum", "options", "backtest", "alpha"]
+
+# Core engine (scoring, gates, backtest, metrics, risk) is stdlib-only so it
+# runs and tests green without any of the optional integrations below.
+dependencies = [
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# Live data adapters & analytics — install when wiring real keys.
+data = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "requests>=2.31",
+    "praw>=7.7",          # Reddit
+    "pytrends>=4.9",      # Google Trends (optional)
+]
+ml = ["scikit-learn>=1.3"]   # meta-labeling model
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.5",
+    "mypy>=1.8",
+]
+all = ["rmas[data,ml,dev]"]
+
+[project.scripts]
+rmas = "rmas.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true

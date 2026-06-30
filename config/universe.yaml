@@ -1,0 +1,83 @@
+# Ticker disambiguation control lists.
+# Many common English words ARE valid tickers (AI, ON, NOW, CAT, DD, ARE, FOR...).
+# We only count an ambiguous symbol when context confirms it.
+
+ticker_extraction:
+  # Symbols that are also common words -> require strong context
+  # ($TICKER cashtag, company-name match, option-chain mention, or explicit context).
+  ambiguous_symbols:
+    - A
+    - AI
+    - ALL
+    - ANY
+    - ARE
+    - AT
+    - BE
+    - BIG
+    - BY
+    - CAT
+    - CEO
+    - DD
+    - EPS
+    - FOR
+    - GO
+    - GOOD
+    - HAS
+    - IT
+    - LOVE
+    - NOW
+    - "ON"        # quoted: YAML 1.1 parses ON/OFF/YES/NO as booleans
+    - OPEN
+    - OR
+    - OUT
+    - PLAY
+    - PM
+    - REAL
+    - SO
+    - TV
+    - UK
+    - US
+    - WELL
+    - YOLO
+
+  # Never treat these as tickers even with a $ prefix-like pattern.
+  hard_blocklist:
+    - USD
+    - GDP
+    - CPI
+    - FOMC
+    - SEC
+    - FDA
+    - CEO
+    - CFO
+    - IPO
+    - ETF
+    - YOLO
+    - FOMO
+    - HODL
+    - WSB
+    - DD
+    - IMO
+    - TLDR
+    - EOD
+    - ATH
+    - IV
+
+  # Strong-context cues that validate an ambiguous symbol.
+  context_cues:
+    - calls
+    - puts
+    - shares
+    - strike
+    - earnings
+    - squeeze
+    - float
+    - short interest
+    - breakout
+    - position
+    - bought
+    - holding
+    - price target
+
+  min_symbol_len: 1
+  max_symbol_len: 5
