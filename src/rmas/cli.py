@@ -39,11 +39,22 @@ def _cmd_alert(args) -> int:
 
     cfg = load_config()
     res = run_scan(cfg=cfg, offline=args.offline)
-    text = render_text(res.plans, res.asof)
-    html = render_html(res.plans, res.asof)
+    text = render_text(res.plans, res.asof, actionable=res.actionable)
+    html = render_html(res.plans, res.asof, actionable=res.actionable)
     print(text)
-    subject = f"RMAS — {len(res.plans)} setup(s) {res.asof:%Y-%m-%d}"
-    sent = send_email(subject, text, html, secrets=Secrets(), dry_run=args.dry_run)
+
+    # Safety: never email real-looking signals when the Reddit radar is
+    # synthetic. Degraded runs are forced to dry-run unless --force is given.
+    dry_run = args.dry_run
+    if not res.actionable and not args.force:
+        if dry_run is None or dry_run is False:
+            print("[guard] DEGRADED run (reddit synthetic) — forcing dry-run. "
+                  "Use --force to email anyway.")
+        dry_run = True
+
+    tag = "TEST" if not res.actionable else f"{len(res.plans)} setup(s)"
+    subject = f"RMAS {tag} — {res.asof:%Y-%m-%d}"
+    sent = send_email(subject, text, html, secrets=Secrets(), dry_run=dry_run)
     print(f"[email {'SENT' if sent else 'dry-run / saved to reports/'}]")
     return 0
 
@@ -89,6 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("scan", help="run the daily scan").set_defaults(func=_cmd_scan)
     a = sub.add_parser("alert", help="scan + report + email")
     a.add_argument("--dry-run", action="store_true", default=None)
+    a.add_argument("--force", action="store_true", default=False,
+                   help="email even on a degraded (synthetic-reddit) run")
     a.set_defaults(func=_cmd_alert)
     sub.add_parser("paper", help="scan + open paper positions").set_defaults(func=_cmd_paper)
     sub.add_parser("backtest", help="demo walk-forward backtest").set_defaults(func=_cmd_backtest)

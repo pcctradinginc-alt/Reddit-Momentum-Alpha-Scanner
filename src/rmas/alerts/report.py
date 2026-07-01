@@ -22,11 +22,20 @@ def _plan_block_text(p: TradePlan) -> str:
     )
 
 
-def render_text(plans: list[TradePlan], asof: datetime | None = None) -> str:
+_DEGRADED_TEXT = (
+    "⚠️  DEGRADED RUN — Reddit attention is SYNTHETIC (no live radar).\n"
+    "    These are NOT actionable trade signals. Connect Reddit OAuth to go live.\n"
+)
+
+
+def render_text(plans: list[TradePlan], asof: datetime | None = None,
+                actionable: bool = True) -> str:
     asof = asof or datetime.now(timezone.utc)
+    banner = "" if actionable else _DEGRADED_TEXT
     header = (
         f"RMAS Alerts — {asof:%Y-%m-%d %H:%M UTC}\n"
-        f"{len(plans)} setup(s) passed Discovery + Tradeability + Timing/Risk (all green).\n"
+        + banner
+        + f"{len(plans)} setup(s) passed Discovery + Tradeability + Timing/Risk (all green).\n"
         "Few high-quality trades > many FOMO signals.\n"
         + "=" * 64 + "\n"
     )
@@ -35,8 +44,15 @@ def render_text(plans: list[TradePlan], asof: datetime | None = None) -> str:
     return header + "\n".join(_plan_block_text(p) for p in plans)
 
 
-def render_html(plans: list[TradePlan], asof: datetime | None = None) -> str:
+def render_html(plans: list[TradePlan], asof: datetime | None = None,
+                actionable: bool = True) -> str:
     asof = asof or datetime.now(timezone.utc)
+    degraded = "" if actionable else (
+        '<div style="background:#fff3cd;border:1px solid #ffca2c;padding:10px;'
+        'border-radius:6px;font-family:Arial;color:#664d03">⚠️ <b>DEGRADED RUN</b> — '
+        'Reddit attention is synthetic (no live radar). <b>Not actionable.</b> '
+        'Connect Reddit OAuth to go live.</div>'
+    )
     rows = []
     for p in plans:
         r = p.rationale
@@ -62,6 +78,7 @@ def render_html(plans: list[TradePlan], asof: datetime | None = None) -> str:
     body = "".join(rows) or "<p>No qualifying setups today. Staying flat.</p>"
     return f"""<html><body style="background:#fafafa">
       <h2 style="font-family:Arial">RMAS Alerts — {asof:%Y-%m-%d %H:%M UTC}</h2>
+      {degraded}
       <p style="font-family:Arial;color:#444">{len(plans)} setup(s) — all three gates green.
          Few high-quality trades &gt; many FOMO signals.</p>
       {body}

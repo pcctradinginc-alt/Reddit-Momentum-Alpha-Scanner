@@ -32,11 +32,20 @@ class RedditAdapter:
         self.offline = is_offline(self.secrets) if offline is None else offline
         self._synthetic = SyntheticReddit(synthetic_tickers)
         self._client = None
+        # Records which path produced the data: "oauth" | "public_json" |
+        # "synthetic". Consumers use `is_live` to avoid acting on fake data.
+        self.mode: str = "synthetic"
+
+    @property
+    def is_live(self) -> bool:
+        """True only when mentions came from real Reddit (OAuth or public JSON)."""
+        return self.mode in ("oauth", "public_json")
 
     # ------------------------------------------------------------------ #
     def fetch_mentions(self, subreddits: list[str], lookback_hours: int = 24,
                        limit_per_sub: int = 200) -> list[Mention]:
         if self.offline:
+            self.mode = "synthetic"
             log.info("reddit: offline/synthetic mode")
             return self._synthetic.fetch_mentions(subreddits, lookback_hours)
 
@@ -45,13 +54,16 @@ class RedditAdapter:
         if self.secrets.reddit_ready:
             out = self._fetch_praw(subreddits, cutoff, limit_per_sub)
             if out is not None:
+                self.mode = "oauth"
                 return out
 
         # No app credentials (or PRAW failed) but we're online -> public JSON.
         out = self._fetch_public_json(subreddits, cutoff, limit_per_sub)
         if out is not None:
+            self.mode = "public_json"
             return out
 
+        self.mode = "synthetic"
         log.warning("reddit: all live paths failed; synthetic fallback")
         return self._synthetic.fetch_mentions(subreddits, lookback_hours)
 

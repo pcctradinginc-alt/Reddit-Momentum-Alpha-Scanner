@@ -54,11 +54,18 @@ class ScanResult:
     plans: list[TradePlan] = field(default_factory=list)
     regime: RegimeState | None = None
     rejected: dict[str, int] = field(default_factory=dict)
+    reddit_mode: str = "synthetic"      # "oauth" | "public_json" | "synthetic"
+
+    @property
+    def actionable(self) -> bool:
+        """Alerts are only real when the attention radar (Reddit) is live."""
+        return self.reddit_mode in ("oauth", "public_json")
 
     def summary(self) -> str:
+        flag = "" if self.actionable else "  [DEGRADED: reddit synthetic — NOT actionable]"
         return (f"asof={self.asof:%Y-%m-%d} regime={self.regime.regime if self.regime else '?'} "
-                f"candidates={len(self.candidates)} plans={len(self.plans)} "
-                f"rejected={dict(self.rejected)}")
+                f"reddit={self.reddit_mode} candidates={len(self.candidates)} plans={len(self.plans)} "
+                f"rejected={dict(self.rejected)}{flag}")
 
 
 def _assign_tickers(mentions: list[Mention], xcfg: ExtractionConfig) -> list[Mention]:
@@ -226,7 +233,7 @@ def run_scan(
     # ---- regime hard block ----
     if regime.block_new_longs:
         log.info("regime %s blocks new longs", regime.regime)
-        return ScanResult(asof, candidates, [], regime, dict(rejected))
+        return ScanResult(asof, candidates, [], regime, dict(rejected), reddit.mode)
 
     # ---- strategy + blow-off + meta-label + rank ----
     candidates.sort(key=lambda c: c.rank_score, reverse=True)
@@ -284,4 +291,4 @@ def run_scan(
 
     max_alerts = cfg.run.get("max_alerts_per_day", 3)
     plans = plans[:max_alerts]
-    return ScanResult(asof, candidates, plans, regime, dict(rejected))
+    return ScanResult(asof, candidates, plans, regime, dict(rejected), reddit.mode)
