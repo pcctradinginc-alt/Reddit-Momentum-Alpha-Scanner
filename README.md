@@ -207,7 +207,22 @@ Signal integrity in live mode:
 
 To activate: add the repository Secrets listed at the top of
 `.github/workflows/scan.yml` (at minimum `ALPACA_API_KEY`, `ALPACA_API_SECRET`,
-`SMTP_PASSWORD`) — everything else has working defaults.
+`SMTP_PASSWORD`) — everything else has working defaults. If your git token
+lacks the `workflow` scope, run `./scripts/enable_ci.sh` once (refreshes the
+scope and pushes the workflow).
+
+### Local automation (no cloud at all)
+
+`./scripts/local_autorun_install.sh` installs a macOS LaunchAgent that runs
+the scan every weekday at 14:35 local (~08:35 ET pre-market) directly on your
+machine — same holiday gate, same guards, logs to `logs/local_scan.log`.
+Fill `.env` with real keys to arm it; without keys it runs dry and emails
+nothing. Uninstall: `./scripts/local_autorun_install.sh uninstall`. Run only
+ONE of the two automations with live keys, or you'll get duplicate emails.
+
+The degraded-run guard requires **both** live Reddit AND live market data
+before an email leaves the machine — a half-synthetic run can never send
+real-looking signals.
 
 ---
 

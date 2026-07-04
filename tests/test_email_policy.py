@@ -1,6 +1,24 @@
 """Email policy: no fake signals, no empty-inbox noise, no accidental sends."""
 
+from datetime import datetime, timezone
+
 from rmas.cli import decide_dry_run
+from rmas.pipeline.scan import ScanResult
+
+
+def _res(reddit_mode: str, market_mode: str) -> ScanResult:
+    return ScanResult(asof=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                      reddit_mode=reddit_mode, market_mode=market_mode)
+
+
+def test_actionable_requires_reddit_AND_market_live():
+    assert _res("oauth", "live").actionable
+    assert _res("public_json", "live").actionable
+    # live Reddit but synthetic market data = fake-confirmed signals -> blocked
+    assert not _res("oauth", "synthetic").actionable
+    assert not _res("public_json", "synthetic").actionable
+    assert not _res("synthetic", "live").actionable
+    assert not _res("synthetic", "synthetic").actionable
 
 
 def test_degraded_run_forces_dry_run():

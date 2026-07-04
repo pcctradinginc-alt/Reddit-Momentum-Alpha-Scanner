@@ -35,6 +35,11 @@ class AlpacaAdapter:
     def _live(self) -> bool:
         return not self.offline and self.secrets.alpaca_ready
 
+    @property
+    def mode(self) -> str:
+        """"live" when real market data is in play, else "synthetic"."""
+        return "live" if self._live else "synthetic"
+
     def _headers(self) -> dict[str, str]:
         return {
             "APCA-API-KEY-ID": self.secrets.get("ALPACA_API_KEY"),
