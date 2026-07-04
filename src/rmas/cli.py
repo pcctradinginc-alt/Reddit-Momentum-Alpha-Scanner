@@ -32,6 +32,23 @@ def _cmd_scan(args) -> int:
     return 0
 
 
+def decide_dry_run(actionable: bool, n_plans: int, email_when_no_setups: bool,
+                   cli_dry_run: bool | None, force: bool) -> tuple[bool | None, str]:
+    """Email policy: (dry_run, reason).
+
+    - Degraded (synthetic Reddit) runs never email unless --force.
+    - Empty runs (0 setups) only email when configured — saves inbox noise;
+      the report is always written to reports/ either way.
+    """
+    if cli_dry_run:
+        return True, "cli --dry-run"
+    if not actionable and not force:
+        return True, "degraded run (reddit synthetic) — forcing dry-run; use --force to email anyway"
+    if actionable and n_plans == 0 and not email_when_no_setups and not force:
+        return True, "no setups today — skipping email (run.email_when_no_setups=false)"
+    return cli_dry_run, ""
+
+
 def _cmd_alert(args) -> int:
     from rmas.alerts.email_smtp import send_email
     from rmas.alerts.report import render_html, render_text
@@ -43,14 +60,13 @@ def _cmd_alert(args) -> int:
     html = render_html(res.plans, res.asof, actionable=res.actionable)
     print(text)
 
-    # Safety: never email real-looking signals when the Reddit radar is
-    # synthetic. Degraded runs are forced to dry-run unless --force is given.
-    dry_run = args.dry_run
-    if not res.actionable and not args.force:
-        if dry_run is None or dry_run is False:
-            print("[guard] DEGRADED run (reddit synthetic) — forcing dry-run. "
-                  "Use --force to email anyway.")
-        dry_run = True
+    dry_run, reason = decide_dry_run(
+        res.actionable, len(res.plans),
+        bool(cfg.run.get("email_when_no_setups", False)),
+        args.dry_run, args.force,
+    )
+    if reason:
+        print(f"[guard] {reason}")
 
     tag = "TEST" if not res.actionable else f"{len(res.plans)} setup(s)"
     subject = f"RMAS {tag} — {res.asof:%Y-%m-%d}"

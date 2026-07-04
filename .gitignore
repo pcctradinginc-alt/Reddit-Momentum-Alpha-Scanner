@@ -22,6 +22,7 @@ env/
 data/cache/
 data/raw/
 data/interim/
+data/state/
 *.parquet
 *.feather
 *.sqlite

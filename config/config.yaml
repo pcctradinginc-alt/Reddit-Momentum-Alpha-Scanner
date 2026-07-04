@@ -8,6 +8,8 @@ run:
   timezone: "America/New_York"
   max_alerts_per_day: 3          # ranking, not overtrading
   offline_default: true          # adapters fall back to synthetic/cached data
+  max_symbols_market_data: 25    # cost cap: market/options/news calls per scan
+  email_when_no_setups: false    # skip empty emails (report still saved to reports/)
 
 # ---- Universe / ingestion ----
 universe:

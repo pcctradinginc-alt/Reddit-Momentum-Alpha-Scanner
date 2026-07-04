@@ -174,15 +174,55 @@ now, the risk, the exit, and the expected edge** — e.g.:
 
 ---
 
+## Fully automated operation & running costs
+
+The repo runs itself via GitHub Actions (`.github/workflows/scan.yml`):
+every US trading weekday pre-market it scans, and emails you only when there
+are actionable setups. **Total running cost: $0** — by design, and enforced:
+
+| Cost lever | How it's kept at zero |
+|---|---|
+| CI minutes | Stdlib **holiday/weekend gate** exits before `pip install` (closed days ≈ 10s); slim `.[ci]` install; pip cache; 12-min timeout; ~60 min/month vs 2000 free |
+| Market data | Alpaca free tier; bars cached per day; benchmarks (SPY/QQQ) fetched **once per scan**; liquidity reuses already-fetched bars |
+| API call volume | Market/options/news APIs only hit for discovery-green tickers, hard-capped at `run.max_symbols_market_data` (default 25) per scan |
+| Reddit | Free: OAuth app or the built-in **no-auth public-JSON mode** |
+| Options / news / fundamentals | Tradier + Finnhub free tiers, responses cached per day |
+| Email | Gmail SMTP (App-Password), free; **no email on empty days** (`run.email_when_no_setups: false`) — reports still saved as artifacts |
+
+Signal integrity in live mode:
+
+- **Real attention history**: daily mention counts persist in
+  `data/state/attention_history.json` (kept warm across CI runs via
+  `actions/cache`), so discovery z-scores compare today against *genuine*
+  history. Cold start is honest: a ticker needs ~5 recorded days before it can
+  fire — expect the first alerts after about a week of live runs.
+- **Real regime filter**: VIX proxy from 20d realized SPY volatility, 200dma
+  trend, breadth and QQQ-SPY momentum spread — computed from bars already paid
+  for (i.e. free).
+- **Real relative strength**: SPY/QQQ benchmark returns from live bars.
+- **Real spread + market cap** in the liquidity hard-filter (Alpaca quote +
+  Finnhub profile), with synthetic fallback only when a key is missing.
+- **Degraded-run guard**: if Reddit fell back to synthetic, the run never
+  emails (unless `--force`).
+
+To activate: add the repository Secrets listed at the top of
+`.github/workflows/scan.yml` (at minimum `ALPACA_API_KEY`, `ALPACA_API_SECRET`,
+`SMTP_PASSWORD`) — everything else has working defaults.
+
+---
+
 ## Roadmap / status
 
 MVP 1–7 implemented: structure+config+logging+tests · Reddit ingestion +
 disambiguation · price/volume momentum · the three gates · backtest+costs ·
 paper-trading+alerts · options flow / catalyst / regime / meta-labeling.
+Plus: full automation (scheduled CI + holiday gate + persisted attention
+history) with live benchmark/regime/liquidity wiring at $0 running cost.
 
 Next: wire real point-in-time historical data for genuine walk-forward research,
 expand catalyst sources (SEC/earnings calendars), and calibrate the meta-label
-model on live forward returns.
+model on live forward returns (the meta-label gate stays inactive until a
+trained model is supplied).
 
 ## License
 

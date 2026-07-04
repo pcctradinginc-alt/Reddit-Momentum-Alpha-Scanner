@@ -1,7 +1,11 @@
-"""Alpaca market-data adapter (daily bars + a liquidity snapshot).
+"""Alpaca market-data adapter (daily bars, benchmark returns, liquidity).
 
 Uses the Alpaca Data REST API via ``requests``. Falls back to synthetic data
 offline or without keys. Keys come from the environment only.
+
+Cost discipline: live bar responses are cached per (ticker, lookback, day) in
+the local JSON cache, so re-runs and the multiple consumers within one scan
+never pay for the same request twice.
 """
 
 from __future__ import annotations
@@ -9,11 +13,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from rmas.config import Secrets, is_offline
+from rmas.data import cache
 from rmas.data.base import SyntheticMarket
 from rmas.logging_setup import get_logger
+from rmas.mathx import pct_change
 from rmas.types import Bar, LiquiditySnapshot
 
 log = get_logger("data.alpaca")
+
+# Offline defaults preserve the deterministic synthetic behaviour.
+_OFFLINE_BENCHMARKS = {"SPY": 0.01, "QQQ": 0.012, "SECTOR": 0.008}
 
 
 class AlpacaAdapter:
@@ -32,9 +41,18 @@ class AlpacaAdapter:
             "APCA-API-SECRET-KEY": self.secrets.get("ALPACA_API_SECRET"),
         }
 
+    # ------------------------------------------------------------------ #
     def daily_bars(self, ticker: str, lookback_days: int = 60) -> list[Bar]:
         if not self._live:
             return self._synthetic.daily_bars(ticker, lookback_days)
+
+        day = datetime.now(timezone.utc).date().isoformat()
+        cache_key = f"{ticker}_{lookback_days}_{day}"
+        cached = cache.get("alpaca_bars", cache_key)
+        if cached:
+            return [Bar(t=datetime.fromisoformat(b["t"]), open=b["o"], high=b["h"],
+                        low=b["l"], close=b["c"], volume=b["v"]) for b in cached]
+
         try:  # pragma: no cover - live network
             import requests
 
@@ -52,25 +70,69 @@ class AlpacaAdapter:
                 )
                 for b in bars
             ]
+            if out:
+                cache.put("alpaca_bars", cache_key,
+                          [{"t": b.t.isoformat(), "o": b.open, "h": b.high,
+                            "l": b.low, "c": b.close, "v": b.volume} for b in out])
             return out or self._synthetic.daily_bars(ticker, lookback_days)
         except Exception as exc:  # pragma: no cover
             log.warning("alpaca bars failed for %s (%s); synthetic", ticker, exc)
             return self._synthetic.daily_bars(ticker, lookback_days)
 
-    def liquidity(self, ticker: str) -> LiquiditySnapshot:
-        # A full liquidity snapshot needs fundamentals/short-interest from a
-        # dedicated provider; for now derive volume-based fields from bars and
-        # fall back to synthetic for the rest.
-        bars = self.daily_bars(ticker, 5)
+    # ------------------------------------------------------------------ #
+    def benchmark_returns(self, lookback: int = 20) -> dict[str, float]:
+        """Real SPY/QQQ `lookback`-day returns (live) or neutral defaults."""
+        if not self._live:
+            return dict(_OFFLINE_BENCHMARKS)
+        out: dict[str, float] = {}
+        for sym in ("SPY", "QQQ"):
+            bars = self.daily_bars(sym, lookback + 5)
+            if len(bars) > lookback:
+                out[sym] = pct_change(bars[-1 - lookback].close, bars[-1].close)
+            else:
+                out[sym] = 0.0
+        out["SECTOR"] = out.get("SPY", 0.0)  # sector proxy until sector ETFs are wired
+        return out
+
+    # ------------------------------------------------------------------ #
+    def spread_bps(self, ticker: str) -> float | None:
+        """Bid/ask spread in bps from the latest quote (live only)."""
+        if not self._live:
+            return None
+        try:  # pragma: no cover - live network
+            import requests
+
+            data_url = self.secrets.get("ALPACA_DATA_URL", "https://data.alpaca.markets")
+            r = requests.get(f"{data_url}/v2/stocks/{ticker}/quotes/latest",
+                             headers=self._headers(), timeout=15)
+            r.raise_for_status()
+            q = r.json().get("quote", {})
+            bid, ask = float(q.get("bp", 0)), float(q.get("ap", 0))
+            if bid <= 0 or ask <= 0 or ask < bid:
+                return None
+            mid = (bid + ask) / 2.0
+            return (ask - bid) / mid * 10_000.0
+        except Exception as exc:  # pragma: no cover
+            log.warning("alpaca quote failed for %s (%s)", ticker, exc)
+            return None
+
+    # ------------------------------------------------------------------ #
+    def liquidity(self, ticker: str, bars: list[Bar] | None = None,
+                  market_cap_usd: float | None = None) -> LiquiditySnapshot:
+        """Liquidity snapshot. Pass `bars` to reuse already-fetched data and
+        `market_cap_usd` from a fundamentals source; missing pieces fall back
+        to synthetic values."""
+        bars = bars or self.daily_bars(ticker, 5)
         if not bars:
             return self._synthetic.liquidity(ticker)
         last = bars[-1]
         synth = self._synthetic.liquidity(ticker)
+        spread = self.spread_bps(ticker)
         return LiquiditySnapshot(
             ticker=ticker,
-            market_cap_usd=synth.market_cap_usd,
+            market_cap_usd=market_cap_usd if market_cap_usd else synth.market_cap_usd,
             dollar_volume_usd=last.close * last.volume,
-            bid_ask_spread_bps=synth.bid_ask_spread_bps,
+            bid_ask_spread_bps=spread if spread is not None else synth.bid_ask_spread_bps,
             short_interest_pct=synth.short_interest_pct,
             float_shares=synth.float_shares,
             borrow_available=synth.borrow_available,
