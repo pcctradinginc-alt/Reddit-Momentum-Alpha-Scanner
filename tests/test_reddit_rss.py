@@ -35,7 +35,7 @@ def _feed_bytes() -> bytes:
 
 def test_parse_atom_extracts_fresh_entries_only():
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).timestamp()
-    mentions = _parse_reddit_atom(_feed_bytes(), "stocks", cutoff)
+    mentions, last_id, reached_cutoff = _parse_reddit_atom(_feed_bytes(), "stocks", cutoff)
     assert len(mentions) == 1
     m = mentions[0]
     assert m.author == "trader_one"                  # "/u/" prefix stripped
@@ -45,6 +45,7 @@ def test_parse_atom_extracts_fresh_entries_only():
     assert "<p>" not in m.text
     assert m.permalink.endswith("/abc/post/")
     assert m.is_submission
+    assert reached_cutoff                            # the stale entry crossed the window
 
 
 def test_parse_atom_tolerates_garbage_dates():
@@ -53,7 +54,7 @@ def test_parse_atom_tolerates_garbage_dates():
         b"not-a-date",
     )
     # must not raise; bad entry is skipped
-    mentions = _parse_reddit_atom(feed, "stocks", 0)
+    mentions, _, _ = _parse_reddit_atom(feed, "stocks", 0)
     assert all("not-a-date" not in m.text for m in mentions)
 
 

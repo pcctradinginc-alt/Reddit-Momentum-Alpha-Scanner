@@ -43,7 +43,11 @@ class TrendsAdapter:
             return 0.0
 
     def x_attention_z(self, ticker: str) -> float:
-        # X/Twitter optional; synthetic placeholder unless a bearer token + impl.
+        """X/Twitter attention. No implementation yet — LIVE runs must return
+        a neutral 0.0 (never fabricated noise into a real ranking). The
+        synthetic value exists only for offline demos/tests."""
+        if not self.offline:
+            return 0.0
         import random
 
         rng = random.Random(_seed_for(ticker, "x"))

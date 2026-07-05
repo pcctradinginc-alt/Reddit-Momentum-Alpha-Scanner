@@ -56,6 +56,9 @@ def _cmd_alert(args) -> int:
 
     cfg = load_config()
     res = run_scan(cfg=cfg, offline=args.offline)
+    # Observability: the rejected-per-gate breakdown is what makes threshold
+    # tuning from CI logs possible — always print it.
+    print(res.summary())
     text = render_text(res.plans, res.asof, actionable=res.actionable)
     html = render_html(res.plans, res.asof, actionable=res.actionable)
     print(text)

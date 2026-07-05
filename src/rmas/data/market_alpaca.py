@@ -30,6 +30,9 @@ class AlpacaAdapter:
         self.secrets = secrets or Secrets()
         self.offline = is_offline(self.secrets) if offline is None else offline
         self._synthetic = SyntheticMarket()
+        # Which data feed actually served bars: "sip" (consolidated, correct
+        # volume) or "iex" (single venue, ~2-3% of market volume). Logged once.
+        self.feed_used: str | None = None
 
     @property
     def _live(self) -> bool:
@@ -62,19 +65,40 @@ class AlpacaAdapter:
             import requests
 
             data_url = self.secrets.get("ALPACA_DATA_URL", "https://data.alpaca.markets")
-            start = (datetime.now(timezone.utc) - timedelta(days=lookback_days * 2)).date().isoformat()
             url = f"{data_url}/v2/stocks/{ticker}/bars"
-            params = {"timeframe": "1Day", "start": start, "limit": lookback_days, "adjustment": "split"}
-            r = requests.get(url, headers=self._headers(), params=params, timeout=15)
-            r.raise_for_status()
-            bars = r.json().get("bars", [])
-            out = [
-                Bar(
-                    t=datetime.fromisoformat(b["t"].replace("Z", "+00:00")),
-                    open=b["o"], high=b["h"], low=b["l"], close=b["c"], volume=b["v"],
-                )
-                for b in bars
-            ]
+            # End the window >15 min in the past: the free (Basic) plan may
+            # query full consolidated SIP history outside that window. IEX is
+            # only a fallback — its volume is a ~2-3% sliver of the market and
+            # would poison rel_volume and the dollar-volume liquidity filter.
+            end = datetime.now(timezone.utc) - timedelta(minutes=16)
+            start = (end - timedelta(days=lookback_days * 2)).date().isoformat()
+            params = {"timeframe": "1Day", "start": start,
+                      "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "limit": lookback_days, "adjustment": "split"}
+
+            out: list[Bar] = []
+            for feed in ("sip", "iex"):
+                r = requests.get(url, headers=self._headers(),
+                                 params={**params, "feed": feed}, timeout=15)
+                if r.status_code != 200:
+                    log.debug("alpaca bars feed=%s -> %s for %s", feed, r.status_code, ticker)
+                    continue
+                bars = r.json().get("bars", [])
+                out = [
+                    Bar(
+                        t=datetime.fromisoformat(b["t"].replace("Z", "+00:00")),
+                        open=b["o"], high=b["h"], low=b["l"], close=b["c"], volume=b["v"],
+                    )
+                    for b in bars
+                ]
+                if out:
+                    if self.feed_used != feed:
+                        self.feed_used = feed
+                        log.info("alpaca live bars: feed=%s%s", feed,
+                                 "" if feed == "sip" else
+                                 " (WARNING: IEX volume is a small market sliver)")
+                    break
+
             if out:
                 cache.put("alpaca_bars", cache_key,
                           [{"t": b.t.isoformat(), "o": b.open, "h": b.high,
@@ -123,10 +147,12 @@ class AlpacaAdapter:
 
     # ------------------------------------------------------------------ #
     def liquidity(self, ticker: str, bars: list[Bar] | None = None,
-                  market_cap_usd: float | None = None) -> LiquiditySnapshot:
-        """Liquidity snapshot. Pass `bars` to reuse already-fetched data and
-        `market_cap_usd` from a fundamentals source; missing pieces fall back
-        to synthetic values."""
+                  market_cap_usd: float | None = None,
+                  dollar_volume_usd: float | None = None) -> LiquiditySnapshot:
+        """Liquidity snapshot. Pass `bars` to reuse already-fetched data,
+        `market_cap_usd` / `dollar_volume_usd` from a fundamentals source
+        (consolidated volume beats IEX-sliver bar volume); missing pieces
+        fall back to synthetic values."""
         bars = bars or self.daily_bars(ticker, 5)
         if not bars:
             return self._synthetic.liquidity(ticker)
@@ -136,7 +162,7 @@ class AlpacaAdapter:
         return LiquiditySnapshot(
             ticker=ticker,
             market_cap_usd=market_cap_usd if market_cap_usd else synth.market_cap_usd,
-            dollar_volume_usd=last.close * last.volume,
+            dollar_volume_usd=dollar_volume_usd if dollar_volume_usd else last.close * last.volume,
             bid_ask_spread_bps=spread if spread is not None else synth.bid_ask_spread_bps,
             short_interest_pct=synth.short_interest_pct,
             float_shares=synth.float_shares,

@@ -25,6 +25,7 @@ from datetime import datetime
 
 from rmas.backtest.meta_labeling import MetaLabeler
 from rmas.config import Config, Secrets, is_offline, load_config
+from rmas.data.apewisdom_source import ApeWisdomAdapter
 from rmas.data.attention_store import AttentionStore
 from rmas.data.base import synthetic_attention_series
 from rmas.data.fundamentals_finnhub import FinnhubFundamentals
@@ -136,6 +137,7 @@ def run_scan(
     news = NewsAdapter(secrets, offline=off)
     trends = TrendsAdapter(secrets, offline=off)
     funda = FinnhubFundamentals(secrets, offline=off)
+    hype = ApeWisdomAdapter(secrets, offline=off)
 
     xcfg = ExtractionConfig.from_universe(cfg.to_dict())
 
@@ -143,7 +145,8 @@ def run_scan(
     lookback_h = 24
 
     # ---- 1) ingest + extract + bot filter (free: no market API involved) ----
-    raw = reddit.fetch_mentions(subs, lookback_h)
+    raw = reddit.fetch_mentions(subs, lookback_h,
+                                limit_per_sub=cfg.universe.get("posts_per_subreddit", 200))
     mentions = _assign_tickers(raw, xcfg)
     score_mentions(mentions, BotConfig())
 
@@ -227,8 +230,13 @@ def run_scan(
 
         # ---- tradeability ----
         bars = market.daily_bars(ticker, 60)
-        liq = market.liquidity(ticker, bars=bars,
-                               market_cap_usd=funda.market_cap_usd(ticker))
+        last_close = bars[-1].close if bars else 0.0
+        liq = market.liquidity(
+            ticker, bars=bars,
+            market_cap_usd=funda.market_cap_usd(ticker),
+            # consolidated 10d avg $-volume beats IEX-sliver bar volume
+            dollar_volume_usd=funda.avg_dollar_volume_usd(ticker, last_close),
+        )
         opt = options.options_snapshot(ticker)
         minp = MomentumInput(ticker=ticker, bars=bars, benchmark_returns=bench)
         mfeat = build_momentum_features(minp)
@@ -256,7 +264,11 @@ def run_scan(
             reddit_decaying=early.is_decaying(),
             price_up_while_reddit_down=(mfeat.get("_raw_r5", 0) > 0 and early.is_decaying()),
             mainstream_coverage=len(headlines) >= MAINSTREAM_HEADLINE_COUNT,
-            is_top_hype_ticker=False,
+            # sitting at the very top of the aggregated hype list = late
+            is_top_hype_ticker=(
+                (hype.rank(ticker) or 999)
+                <= int(cfg.timing_risk.get("top_hype_rank", 3))
+            ),
         )
         tr_gate = score_timing_risk(tinp, cfg.timing_risk)
         if not tr_gate.green:

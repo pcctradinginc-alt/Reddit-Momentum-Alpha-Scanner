@@ -37,11 +37,22 @@ _ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _parse_reddit_atom(payload: bytes, sub: str, cutoff: float) -> list[Mention]:
-    """Parse a Reddit ``/new/.rss`` Atom feed into Mentions (pure, testable)."""
+def _parse_reddit_atom(payload: bytes, sub: str,
+                       cutoff: float) -> tuple[list[Mention], str | None, bool]:
+    """Parse a Reddit ``/new/.rss`` Atom feed page (pure, testable).
+
+    Returns ``(mentions, last_entry_id, reached_cutoff)`` — the last ``t3_*``
+    id feeds the ``after=`` pagination param, ``reached_cutoff`` says an entry
+    older than the lookback window was seen (no point fetching more pages).
+    """
     root = ET.fromstring(payload)
     out: list[Mention] = []
+    last_id: str | None = None
+    reached_cutoff = False
     for e in root.findall("a:entry", _ATOM_NS):
+        eid = e.findtext("a:id", default="", namespaces=_ATOM_NS)
+        if eid.startswith("t3_"):
+            last_id = eid
         updated = e.findtext("a:updated", default="", namespaces=_ATOM_NS)
         try:
             ts = datetime.fromisoformat(updated)
@@ -50,6 +61,7 @@ def _parse_reddit_atom(payload: bytes, sub: str, cutoff: float) -> list[Mention]
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         if ts.timestamp() < cutoff:
+            reached_cutoff = True
             continue
         author = (e.findtext("a:author/a:name", default="[deleted]",
                              namespaces=_ATOM_NS) or "[deleted]").removeprefix("/u/")
@@ -68,7 +80,7 @@ def _parse_reddit_atom(payload: bytes, sub: str, cutoff: float) -> list[Mention]
             permalink=link.get("href", "") if link is not None else "",
             author_age_days=None,         # not exposed via RSS
         ))
-    return out
+    return out, last_id, reached_cutoff
 
 
 class RedditAdapter:
@@ -233,47 +245,78 @@ class RedditAdapter:
                  len(out), subs_ok)
         return out, subs_ok
 
-    def _fetch_rss(self, subreddits, cutoff,
-                   limit_per_sub) -> tuple[list[Mention], int] | None:
-        """No-auth workaround: Reddit's Atom feeds evade the JSON IP-blocks.
-
-        Returns (mentions, subs_ok). Reddit rate-limits the feeds hard from
-        shared/datacenter IPs, so pacing is deliberately slow (once per day,
-        the extra ~1-2 min of runtime is irrelevant, coverage is not).
-        """
+    def _get_rss_page(self, sub: str, after: str | None,
+                      limit: int) -> bytes | None:
+        """One RSS page with 429 backoff. Separated for testability."""
         try:  # pragma: no cover - requires live network
             import requests
         except Exception:
             return None
-
         ua = self.secrets.get("REDDIT_USER_AGENT") or _DEFAULT_UA
+        params: dict[str, str | int] = {"limit": min(limit, 100)}
+        if after:
+            params["after"] = after
+        r = None
+        for attempt in range(3):  # pragma: no cover - live network
+            r = requests.get(
+                f"https://www.reddit.com/r/{sub}/new/.rss",
+                headers={"User-Agent": ua}, params=params, timeout=15,
+            )
+            if r.status_code != 429:
+                break
+            time.sleep(20 * (attempt + 1))   # 429: back off and retry
+        if r is None or r.status_code != 200:  # pragma: no cover
+            log.warning("reddit rss %s on r/%s",
+                        r.status_code if r is not None else "?", sub)
+            return None
+        return r.content  # pragma: no cover
+
+    def _fetch_rss(self, subreddits, cutoff,
+                   limit_per_sub) -> tuple[list[Mention], int] | None:
+        """No-auth workaround: Reddit's Atom feeds evade the JSON IP-blocks.
+
+        Returns (mentions, subs_ok). Paginates via ``after=t3_*`` up to
+        limit_per_sub posts so busy days aren't capped at one page — capping
+        would compress exactly the attention spikes we want to measure.
+        Reddit rate-limits the feeds hard from shared/datacenter IPs, so
+        pacing is deliberately slow (once per day, the extra minutes of
+        runtime are irrelevant; coverage is not).
+        """
         out: list[Mention] = []
         subs_ok = 0
-        for i, sub in enumerate(subreddits):
-            if i:
-                time.sleep(8)                 # generous spacing between feeds
-            try:  # pragma: no cover - live network
-                r = None
-                for attempt in range(3):
-                    r = requests.get(
-                        f"https://www.reddit.com/r/{sub}/new/.rss",
-                        headers={"User-Agent": ua},
-                        params={"limit": min(limit_per_sub, 100)},
-                        timeout=15,
-                    )
-                    if r.status_code != 429:
-                        break
-                    time.sleep(20 * (attempt + 1))   # 429: back off and retry
-                if r is None or r.status_code != 200:
-                    log.warning("reddit rss %s on r/%s",
-                                r.status_code if r is not None else "?", sub)
-                    continue
-                out.extend(_parse_reddit_atom(r.content, sub, cutoff))
+        first_request = True
+        deadline = time.monotonic() + 480    # hard budget: never blow the CI timeout
+        for sub in subreddits:
+            if time.monotonic() > deadline:
+                log.warning("reddit rss time budget exhausted before r/%s "
+                            "(coverage floor decides live/degraded)", sub)
+                break
+            got_page = False
+            after: str | None = None
+            fetched = 0
+            while fetched < limit_per_sub and time.monotonic() <= deadline:
+                if not first_request:
+                    time.sleep(8)             # generous spacing between requests
+                first_request = False
+                payload = self._get_rss_page(sub, after, limit_per_sub - fetched)
+                if payload is None:
+                    break
+                try:
+                    mentions, last_id, reached_cutoff = _parse_reddit_atom(
+                        payload, sub, cutoff)
+                except ET.ParseError as exc:
+                    log.warning("reddit rss parse failed on r/%s (%s)", sub, exc)
+                    break
+                got_page = True
+                out.extend(mentions)
+                fetched += max(len(mentions), 1)
+                if reached_cutoff or not mentions or last_id is None:
+                    break                     # window exhausted / feed ended
+                after = last_id
+            if got_page:
                 subs_ok += 1
-            except Exception as exc:  # pragma: no cover
-                log.warning("reddit rss failed on r/%s (%s)", sub, exc)
-                continue
         if not subs_ok:
             return None
-        log.info("reddit: RSS (no-auth) mode, %d posts from %d subs", len(out), subs_ok)
+        log.info("reddit: RSS (no-auth) mode, %d posts from %d subs",
+                 len(out), subs_ok)
         return out, subs_ok

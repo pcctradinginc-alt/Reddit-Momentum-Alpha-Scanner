@@ -24,6 +24,7 @@ universe:
     - Shortsqueeze
   lookback_short_days: 7
   lookback_long_days: 30
+  posts_per_subreddit: 200         # RSS/JSON pagination depth per sub & day
   min_market_cap_usd: 150_000_000
   min_dollar_volume_usd: 5_000_000
 
@@ -66,6 +67,7 @@ tradeability:
 
 # ---- Timing / Risk gate ----
 timing_risk:
+  top_hype_rank: 3               # ApeWisdom rank <= this = already THE hype ticker (late)
   weights:
     entry_trigger: 0.40          # breakout / pullback-to-VWAP / ORB / drift / squeeze
     not_overheated: 0.35         # FOMO / blow-off filter (higher = calmer)

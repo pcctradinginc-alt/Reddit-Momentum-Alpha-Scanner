@@ -48,3 +48,44 @@ class FinnhubFundamentals:
         except Exception as exc:  # pragma: no cover
             log.warning("finnhub profile failed for %s (%s)", ticker, exc)
             return None
+
+    # ------------------------------------------------------------------ #
+    def metrics(self, ticker: str) -> dict | None:
+        """Basic financials (/stock/metric, free tier), cached per day."""
+        if not self._live:
+            return None
+        day = datetime.now(timezone.utc).date().isoformat()
+        cached = cache.get("finnhub_metric", f"{ticker}_{day}")
+        if cached is not None:
+            return cached or None
+        try:  # pragma: no cover - live network
+            import requests
+
+            r = requests.get(
+                "https://finnhub.io/api/v1/stock/metric",
+                params={"symbol": ticker, "metric": "all",
+                        "token": self.secrets.get("FINNHUB_API_KEY")},
+                timeout=15,
+            )
+            r.raise_for_status()
+            m = r.json().get("metric") or {}
+            cache.put("finnhub_metric", f"{ticker}_{day}", m)
+            return m or None
+        except Exception as exc:  # pragma: no cover
+            log.warning("finnhub metric failed for %s (%s)", ticker, exc)
+            return None
+
+    def avg_dollar_volume_usd(self, ticker: str, close: float) -> float | None:
+        """Consolidated 10d avg dollar volume — immune to the IEX-sliver
+        problem of free Alpaca bars. Finnhub reports volume in MILLIONS of
+        shares."""
+        m = self.metrics(ticker)
+        if not m or close <= 0:
+            return None
+        vol_millions = m.get("10DayAverageTradingVolume") or m.get(
+            "3MonthAverageTradingVolume") or 0.0
+        try:
+            dollar = float(vol_millions) * 1_000_000.0 * close
+        except (TypeError, ValueError):
+            return None
+        return dollar or None
