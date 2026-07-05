@@ -1,4 +1,4 @@
-"""X (Twitter) attention cross-check — WITHOUT any X API access.
+"""X (Twitter) attention cross-check — WITHOUT any X API access, GitHub-only.
 
 Reality check (tested 2026-07-05): every keyless path into X itself is dead —
 all public Nitter instances return 403, xcancel's RSS needs a manual e-mail
@@ -7,9 +7,17 @@ weekly. The stable alternative is **StockTwits**: the finance-native X clone
 (cashtag streams, same retail crowd, heavy user overlap), whose public JSON
 API has been keyless and stable for years.
 
-This adapter is therefore source-agnostic "X-style attention": message volume,
-unique posters, crowd sentiment and WATCHLIST COUNT per ticker. A real X feed
-can be plugged in behind the same interface later.
+Transport chain (StockTwits 403s datacenter IPs like GitHub runners):
+  1. direct fetch with browser headers — works from residential IPs;
+  2. **Jina Reader** (r.jina.ai, keyless public fetch service) — its fetchers
+     are served by StockTwits, verified from CI; strict 3s pacing for the
+     anonymous 20-req/min limit;
+  3. today's value already in the state files (same-day rerun);
+  4. NEUTRAL.
+
+This adapter is source-agnostic "X-style attention": message volume, unique
+posters, crowd sentiment and WATCHLIST COUNT per ticker. A real X feed can be
+plugged in behind the same interface later.
 
 Alpha-safety contract (the reason for the design):
   * every failure / missing datum degrades to NEUTRAL (z=0, growth=0) — the
@@ -17,13 +25,16 @@ Alpha-safety contract (the reason for the design):
   * attention_z needs >=5 recorded days of the ticker's own history before it
     is non-zero (same honest cold start as the Reddit attention store);
   * signals are bounded (z clamped to +-3, growth clipped to [0,1]) so one
-    bad scrape can never dominate a rank.
+    bad scrape can never dominate a rank;
+  * a hard per-run time budget: X enrichment may never stall the scan.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 from rmas.config import ROOT, Secrets, is_offline
 from rmas.data.attention_store import AttentionStore
@@ -46,9 +57,22 @@ _UA = {
 }
 X_HISTORY_PATH = ROOT / "data" / "state" / "x_history.json"       # [msgs, users]
 X_WATCHERS_PATH = ROOT / "data" / "state" / "x_watchers.json"     # [watchers, 0]
+_JINA_PREFIX = "https://r.jina.ai/"
 MAX_PAGES = 3               # 30 msgs/page; >=90 msgs/24h recorded as capped 90
 MIN_WATCHER_DAYS = 3
 Z_CLAMP = 3.0
+RUN_BUDGET_S = 300          # hard cap for ALL X enrichment in one scan
+
+
+def _extract_json(raw: str) -> dict | None:
+    """Parse a JSON object from a possibly wrapped response body."""
+    start = raw.find("{")
+    if start < 0:
+        return None
+    try:
+        return json.loads(raw[start:])
+    except ValueError:
+        return None
 
 
 def _metrics_from_messages(pages: list[dict], now: datetime) -> dict:
@@ -98,41 +122,71 @@ class XAttentionAdapter:
         # must never stall the scan. Everything degrades to neutral.
         self._consecutive_failures = 0
         self._dead = False
+        self._deadline = time.monotonic() + RUN_BUDGET_S
+        # Which transport served data this run: "direct" | "jina" | None.
+        self.transport: str | None = None
+        # Once direct fetching 403s (datacenter IP), skip straight to Jina.
+        self._direct_blocked = False
 
     # ------------------------------------------------------------------ #
-    def _fetch_stream(self, ticker: str) -> list[dict] | None:
-        """Up to MAX_PAGES of the public symbol stream. None on any failure."""
+    def _http_json(self, url: str, params: dict) -> dict | None:
+        """One JSON fetch: direct first, then via Jina Reader (see module
+        docstring). None on failure. Never raises."""
         try:  # pragma: no cover - live network
             import requests
 
-            pages: list[dict] = []
-            max_id: int | None = None
-            for _ in range(MAX_PAGES):
-                params = {"max": max_id} if max_id else {}
-                r = requests.get(_STREAM_URL.format(sym=ticker),
-                                 params=params, headers=_UA, timeout=8)
-                if r.status_code == 429:
-                    time.sleep(2)
-                    r = requests.get(_STREAM_URL.format(sym=ticker),
-                                     params=params, headers=_UA, timeout=8)
-                if r.status_code != 200:
-                    log.warning("stocktwits %s for %s", r.status_code, ticker)
-                    break
-                page = r.json()
-                pages.append(page)
-                cursor = page.get("cursor") or {}
-                msgs = page.get("messages") or []
-                if not cursor.get("more") or not msgs:
-                    break
-                oldest = msgs[-1].get("created_at", "")
-                ts = datetime.fromisoformat(str(oldest).replace("Z", "+00:00"))
-                if ts < datetime.now(timezone.utc) - timedelta(hours=24):
-                    break
-                max_id = cursor.get("max")
-            return pages or None
+            if not self._direct_blocked:
+                try:
+                    r = requests.get(url, params=params, headers=_UA, timeout=8)
+                    if r.status_code == 200:
+                        self.transport = "direct"
+                        return r.json()
+                    if r.status_code == 403:      # IP-blocked: stop retrying
+                        self._direct_blocked = True
+                    log.info("stocktwits direct %s — trying jina", r.status_code)
+                except Exception as exc:
+                    log.info("stocktwits direct failed (%s) — trying jina", exc)
+
+            time.sleep(3)                          # anonymous jina: 20 req/min
+            full = url + ("?" + urlencode(params) if params else "")
+            r = requests.get(_JINA_PREFIX + full,
+                             headers={"X-Return-Format": "text"}, timeout=25)
+            if r.status_code != 200:
+                log.warning("jina %s for %s", r.status_code, url)
+                return None
+            data = _extract_json(r.text)
+            if data is not None:
+                self.transport = "jina"
+            return data
         except Exception as exc:  # pragma: no cover
-            log.warning("stocktwits stream failed for %s (%s)", ticker, exc)
+            log.warning("x fetch failed for %s (%s)", url, exc)
             return None
+
+    def _fetch_stream(self, ticker: str) -> list[dict] | None:
+        """Up to MAX_PAGES of the public symbol stream. None on any failure."""
+        pages: list[dict] = []
+        max_id: int | None = None
+        for _ in range(MAX_PAGES):
+            if time.monotonic() > self._deadline:
+                break
+            page = self._http_json(_STREAM_URL.format(sym=ticker),
+                                   {"max": max_id} if max_id else {})
+            if page is None:
+                break
+            pages.append(page)
+            cursor = page.get("cursor") or {}
+            msgs = page.get("messages") or []
+            if not cursor.get("more") or not msgs:
+                break
+            try:
+                oldest = str(msgs[-1].get("created_at", ""))
+                ts = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+            except ValueError:
+                break
+            if ts < datetime.now(timezone.utc) - timedelta(hours=24):
+                break
+            max_id = cursor.get("max")
+        return pages or None
 
     # ------------------------------------------------------------------ #
     def metrics(self, ticker: str, asof: date | None = None) -> dict | None:
@@ -146,7 +200,7 @@ class XAttentionAdapter:
         asof = asof or datetime.now(timezone.utc).date()
 
         pages = None
-        if not self._dead:
+        if not self._dead and time.monotonic() <= self._deadline:
             time.sleep(0.5)                 # politeness pacing between tickers
             pages = self._fetch_stream(ticker)
             if pages is None:
@@ -154,15 +208,14 @@ class XAttentionAdapter:
                 if self._consecutive_failures >= 3:
                     self._dead = True
                     log.warning("x/stocktwits source down after %d consecutive "
-                                "failures — feeder state / neutral for this run",
+                                "failures — neutral for the rest of this run",
                                 self._consecutive_failures)
             else:
                 self._consecutive_failures = 0
         if pages is None:
-            # Feeder fallback: StockTwits blocks datacenter IPs (CI runners),
-            # so a LOCAL machine records today's metrics into the state files
-            # and publishes them via the `x-state` git branch. If today's
-            # value is already in the store, consume it as real data.
+            # Same-day rerun fallback: if today's value is already in the
+            # state files (earlier run, persisted via actions/cache),
+            # consume it as real data instead of going dark.
             stored = self._from_store(ticker, asof)
             self._memo[ticker] = stored
             return stored
@@ -176,8 +229,8 @@ class XAttentionAdapter:
         return m
 
     def _from_store(self, ticker: str, asof: date) -> dict | None:
-        """Reconstruct today's metrics from state recorded by the local
-        feeder (rmas xfeed) when the live fetch is IP-blocked here."""
+        """Reconstruct today's metrics from already-recorded state when the
+        live fetch fails (same-day rerun / transient outage)."""
         rec = self._history.day_value(ticker, asof)
         if rec is None:
             return None

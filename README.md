@@ -211,33 +211,27 @@ To activate: add the repository Secrets listed at the top of
 lacks the `workflow` scope, run `./scripts/enable_ci.sh` once (refreshes the
 scope and pushes the workflow).
 
-### Local automation (no cloud at all)
-
-`./scripts/local_autorun_install.sh` installs a macOS LaunchAgent that runs
-the scan every weekday at 14:35 local (~08:35 ET pre-market) directly on your
-machine — same holiday gate, same guards, logs to `logs/local_scan.log`.
-Fill `.env` with real keys to arm it; without keys it runs dry and emails
-nothing. Uninstall: `./scripts/local_autorun_install.sh uninstall`. Run only
-ONE of the two automations with live keys, or you'll get duplicate emails.
-
 The degraded-run guard requires **both** live Reddit AND live market data
 before an email leaves the machine — a half-synthetic run can never send
 real-looking signals.
 
-### X (Twitter) cross-check — without any X API
+### X (Twitter) cross-check — without any X API, GitHub-only
 
 Every keyless path into X is dead (Nitter 403s, xcancel whitelisting,
 login-walled search), so the X-style attention signal comes from
 **StockTwits** (keyless public JSON, the finance-X crowd): message volume,
-unique posters, sentiment and **watchlist inflow** per ticker.
-StockTwits blocks datacenter IPs, so the **local rail feeds CI**: the
-`com.rmas.xfeed` LaunchAgent runs `rmas xfeed` weekdays 14:05 (home IP),
-publishes `data/state/x_*.json` to the `x-state` branch, and the CI scan
-restores them 25 minutes later. Scoring is **alpha-safe by construction**:
+unique posters, sentiment and **watchlist inflow** per ticker. StockTwits
+403s datacenter IPs, so from CI the adapter transparently falls back to
+**Jina Reader** (`r.jina.ai`, keyless public fetch service, 3s pacing for
+its 20-req/min anonymous limit) — verified working from GitHub runners.
+History persists in `data/state/x_*.json` via the same actions/cache as the
+Reddit attention store. Scoring is **alpha-safe by construction**:
 `x_attention_z` needs ≥5 days of the ticker's own history (else neutral 0),
 is clamped ±3 and only modifies rank via the existing divergence term; the
-new watchlist-growth bonus (`cross_source.x_watchers_bonus`) is additive-only
-and 0 when unknown — a dark X channel behaves exactly like before the feature.
+watchlist-growth bonus (`cross_source.x_watchers_bonus`) is additive-only
+and 0 when unknown — a dark X channel behaves exactly like before the
+feature. A hard 5-minute budget plus a circuit breaker guarantee the X
+enrichment can never stall the scan.
 
 ---
 

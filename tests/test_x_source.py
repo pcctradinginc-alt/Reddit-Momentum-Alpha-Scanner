@@ -103,9 +103,9 @@ def test_watchers_growth_bounded_and_additive_only(tmp_path):
     assert a2.watchers_growth("ABC", today) == 0.0  # never negative -> additive-only
 
 
-def test_feeder_state_consumed_when_fetch_blocked(tmp_path, monkeypatch):
-    """CI case: StockTwits 403s the runner IP, but the local feeder already
-    pushed today's numbers into the state files -> real data, real z."""
+def test_same_day_state_consumed_when_fetch_blocked(tmp_path, monkeypatch):
+    """Same-day rerun: today's numbers are already in the state files
+    (persisted via actions/cache) -> real data, real z, no dark signal."""
     monkeypatch.setattr("rmas.data.x_source.time.sleep", lambda s: None)
     a = _adapter(tmp_path)
     d0 = date(2026, 7, 10)
@@ -132,6 +132,26 @@ def test_circuit_breaker_after_three_failures(tmp_path, monkeypatch):
         assert a.metrics(t) is None
     assert calls == ["AA", "BB", "CC"]              # breaker opened after 3
     assert a._dead
+
+
+def test_extract_json_handles_jina_envelope():
+    from rmas.data.x_source import _extract_json
+
+    assert _extract_json('{"a": 1}') == {"a": 1}
+    wrapped = 'Title: \n\nURL Source: x\n\nMarkdown Content:\n{"a": [1, 2]}'
+    assert _extract_json(wrapped) == {"a": [1, 2]}
+    assert _extract_json("no json here") is None
+    assert _extract_json("{broken") is None
+
+
+def test_run_budget_prevents_stall(tmp_path, monkeypatch):
+    monkeypatch.setattr("rmas.data.x_source.time.sleep", lambda s: None)
+    a = _adapter(tmp_path)
+    a._deadline = 0.0                               # budget already exhausted
+    calls = []
+    a._fetch_stream = lambda t: calls.append(t)
+    assert a.metrics("NVDA", date(2026, 7, 6)) is None
+    assert calls == []                              # no fetch attempted
 
 
 def test_memoized_single_fetch_per_run(tmp_path, monkeypatch):
