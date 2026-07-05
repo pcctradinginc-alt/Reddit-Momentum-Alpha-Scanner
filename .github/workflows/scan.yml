@@ -1,0 +1,131 @@
+name: RMAS daily scan
+
+# Runs the scanner in the cloud using repository Secrets and emails alerts.
+# - Scheduled on US trading weekdays; a stdlib holiday gate exits BEFORE the
+#   pip install on weekends/NYSE holidays, so closed days cost ~10 CI-seconds.
+# - Also runnable on demand from the Actions tab ("Run workflow"), with an
+#   optional dry-run that builds the report WITHOUT sending email. Manual runs
+#   bypass the holiday gate.
+#
+# Cost profile (all $0 within free tiers):
+#   GitHub Actions  ~2-3 min x ~21 trading days ≈ 60 min/month (2000 free).
+#   Alpaca/Tradier/Finnhub/Reddit-public-JSON/Gmail: free tiers; API calls are
+#   capped per scan via run.max_symbols_market_data.
+#
+# Required repository Secrets (Settings → Secrets and variables → Actions):
+#   ALPACA_API_KEY, ALPACA_API_SECRET      (market data + news + liquidity)
+#   TRADIER_API_KEY                        (options flow)
+#   SMTP_PASSWORD                          (Gmail App-Password)
+#   REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET (attention radar; without them the
+#                                           no-auth public-JSON mode is used)
+# Optional Secrets (otherwise sensible defaults below are used):
+#   SMTP_USER, ALERT_EMAIL_FROM, ALERT_EMAIL_TO, REDDIT_USER_AGENT, FINNHUB_API_KEY
+
+on:
+  schedule:
+    # 12:30 UTC, Mon–Fri  (~08:30 US/Eastern in summer — pre-market).
+    # GitHub cron is UTC and may be delayed a few minutes.
+    - cron: "30 12 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build report but do NOT send email"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rmas-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      RMAS_OFFLINE: "false"
+      LOG_LEVEL: INFO
+      # --- market data / options ---
+      ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+      ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+      ALPACA_BASE_URL: https://paper-api.alpaca.markets
+      ALPACA_DATA_URL: https://data.alpaca.markets
+      TRADIER_API_KEY: ${{ secrets.TRADIER_API_KEY }}
+      TRADIER_BASE_URL: https://api.tradier.com
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      # --- reddit (the attention radar) ---
+      REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+      REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+      REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT || 'rmas/0.1 (github actions)' }}
+      # --- email (only SMTP_PASSWORD strictly required; rest default to your gmail) ---
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: "587"
+      SMTP_USER: ${{ secrets.SMTP_USER || 'pcctradinginc@gmail.com' }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM || 'pcctradinginc@gmail.com' }}
+      ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO || 'pcctradinginc@gmail.com' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheap stdlib gate BEFORE any install: weekends/holidays cost seconds.
+      # Manual (workflow_dispatch) runs skip the gate on purpose.
+      - name: Trading-day gate
+        id: cal
+        if: github.event_name == 'schedule'
+        run: |
+          if python3 scripts/trading_day.py; then
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+            echo "Market closed — skipping scan (saved CI minutes + API calls)."
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.cal.outputs.open != 'false'
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install (slim CI profile)
+        if: steps.cal.outputs.open != 'false'
+        run: python -m pip install -e ".[ci]"
+
+      # Attention history must survive between runs — it is the REAL
+      # mentions-per-day baseline the discovery z-scores are computed against.
+      - name: Restore attention state
+        if: steps.cal.outputs.open != 'false'
+        uses: actions/cache/restore@v4
+        with:
+          path: data/state
+          key: rmas-state-${{ github.run_id }}
+          restore-keys: |
+            rmas-state-
+
+      - name: Run scan + alert
+        if: steps.cal.outputs.open != 'false'
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "DRY RUN — no email will be sent"
+            rmas --live alert --dry-run
+          else
+            rmas --live alert
+          fi
+
+      - name: Save attention state
+        if: always() && steps.cal.outputs.open != 'false'
+        uses: actions/cache/save@v4
+        with:
+          path: data/state
+          key: rmas-state-${{ github.run_id }}
+
+      - name: Upload report artifact
+        if: always() && steps.cal.outputs.open != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rmas-report
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 7
