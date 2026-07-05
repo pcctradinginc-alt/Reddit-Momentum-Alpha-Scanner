@@ -224,6 +224,21 @@ The degraded-run guard requires **both** live Reddit AND live market data
 before an email leaves the machine — a half-synthetic run can never send
 real-looking signals.
 
+### X (Twitter) cross-check — without any X API
+
+Every keyless path into X is dead (Nitter 403s, xcancel whitelisting,
+login-walled search), so the X-style attention signal comes from
+**StockTwits** (keyless public JSON, the finance-X crowd): message volume,
+unique posters, sentiment and **watchlist inflow** per ticker.
+StockTwits blocks datacenter IPs, so the **local rail feeds CI**: the
+`com.rmas.xfeed` LaunchAgent runs `rmas xfeed` weekdays 14:05 (home IP),
+publishes `data/state/x_*.json` to the `x-state` branch, and the CI scan
+restores them 25 minutes later. Scoring is **alpha-safe by construction**:
+`x_attention_z` needs ≥5 days of the ticker's own history (else neutral 0),
+is clamped ±3 and only modifies rank via the existing divergence term; the
+new watchlist-growth bonus (`cross_source.x_watchers_bonus`) is additive-only
+and 0 when unknown — a dark X channel behaves exactly like before the feature.
+
 ---
 
 ## Roadmap / status
