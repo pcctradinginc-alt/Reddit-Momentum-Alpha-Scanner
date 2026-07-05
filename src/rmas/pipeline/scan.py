@@ -129,7 +129,8 @@ def run_scan(
     rejected: Counter = Counter()
 
     # ---- adapters ----
-    reddit = RedditAdapter(secrets, offline=off)
+    reddit = RedditAdapter(secrets, offline=off,
+                           min_coverage=cfg.run.get("min_reddit_coverage", 0.5))
     market = AlpacaAdapter(secrets, offline=off)
     options = TradierAdapter(secrets, offline=off)
     news = NewsAdapter(secrets, offline=off)

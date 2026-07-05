@@ -10,6 +10,7 @@ run:
   offline_default: true          # adapters fall back to synthetic/cached data
   max_symbols_market_data: 25    # cost cap: market/options/news calls per scan
   email_when_no_setups: false    # skip empty emails (report still saved to reports/)
+  min_reddit_coverage: 0.5       # no-auth run counts as live only if >=50% of subs answered
 
 # ---- Universe / ingestion ----
 universe:

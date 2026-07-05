@@ -73,7 +73,7 @@ def _parse_reddit_atom(payload: bytes, sub: str, cutoff: float) -> list[Mention]
 
 class RedditAdapter:
     def __init__(self, secrets: Secrets | None = None, offline: bool | None = None,
-                 synthetic_tickers: list[str] | None = None):
+                 synthetic_tickers: list[str] | None = None, min_coverage: float = 0.5):
         self.secrets = secrets or Secrets()
         self.offline = is_offline(self.secrets) if offline is None else offline
         self._synthetic = SyntheticReddit(synthetic_tickers)
@@ -82,6 +82,11 @@ class RedditAdapter:
         # "rss" | "synthetic". Consumers use `is_live` to avoid acting on
         # fake data.
         self.mode: str = "synthetic"
+        # A no-auth path only counts as live when at least this fraction of
+        # subreddits answered. Day-to-day coverage swings would otherwise
+        # fake "attention acceleration" in the persisted mention history.
+        self.min_coverage = min_coverage
+        self.coverage: float = 0.0
 
     @property
     def is_live(self) -> bool:
@@ -92,31 +97,35 @@ class RedditAdapter:
     def fetch_mentions(self, subreddits: list[str], lookback_hours: int = 24,
                        limit_per_sub: int = 200) -> list[Mention]:
         if self.offline:
-            self.mode = "synthetic"
+            self.mode, self.coverage = "synthetic", 1.0
             log.info("reddit: offline/synthetic mode")
             return self._synthetic.fetch_mentions(subreddits, lookback_hours)
 
         cutoff = datetime.now(timezone.utc).timestamp() - lookback_hours * 3600
+        total = max(1, len(subreddits))
 
         if self.secrets.reddit_ready:
             out = self._fetch_praw(subreddits, cutoff, limit_per_sub)
             if out is not None:
-                self.mode = "oauth"
+                self.mode, self.coverage = "oauth", 1.0
                 return out
 
         # No app credentials (or PRAW failed) but we're online -> public JSON.
-        out = self._fetch_public_json(subreddits, cutoff, limit_per_sub)
-        if out is not None:
-            self.mode = "public_json"
-            return out
+        for name, fetch in (("public_json", self._fetch_public_json),
+                            ("rss", self._fetch_rss)):
+            res = fetch(subreddits, cutoff, limit_per_sub)
+            if res is None:
+                continue
+            out, subs_ok = res
+            cov = subs_ok / total
+            if cov >= self.min_coverage:
+                self.mode, self.coverage = name, cov
+                return out
+            log.warning("reddit %s coverage %d/%d below min %.0f%% — data would "
+                        "distort the attention history; trying next path",
+                        name, subs_ok, total, self.min_coverage * 100)
 
-        # JSON blocked (403 IP-blocking) -> RSS feeds usually still work.
-        out = self._fetch_rss(subreddits, cutoff, limit_per_sub)
-        if out is not None:
-            self.mode = "rss"
-            return out
-
-        self.mode = "synthetic"
+        self.mode, self.coverage = "synthetic", 1.0
         log.warning("reddit: all live paths failed; synthetic fallback")
         return self._synthetic.fetch_mentions(subreddits, lookback_hours)
 
@@ -173,8 +182,9 @@ class RedditAdapter:
             log.warning("reddit PRAW fetch failed (%s)", exc)
             return None
 
-    def _fetch_public_json(self, subreddits, cutoff, limit_per_sub) -> list[Mention] | None:
-        """No-auth path: read public /r/<sub>/new.json listings."""
+    def _fetch_public_json(self, subreddits, cutoff,
+                           limit_per_sub) -> tuple[list[Mention], int] | None:
+        """No-auth path: public /r/<sub>/new.json. Returns (mentions, subs_ok)."""
         try:  # pragma: no cover - requires live network
             import requests
         except Exception:
@@ -182,7 +192,7 @@ class RedditAdapter:
 
         ua = self.secrets.get("REDDIT_USER_AGENT") or _DEFAULT_UA
         out: list[Mention] = []
-        got_any = False
+        subs_ok = 0
         for sub in subreddits:
             try:  # pragma: no cover - live network
                 r = requests.get(
@@ -197,7 +207,7 @@ class RedditAdapter:
                     continue
                 r.raise_for_status()
                 children = r.json().get("data", {}).get("children", [])
-                got_any = True
+                subs_ok += 1
                 for ch in children:
                     d = ch.get("data", {})
                     if d.get("created_utc", 0) < cutoff:
@@ -217,13 +227,20 @@ class RedditAdapter:
             except Exception as exc:  # pragma: no cover
                 log.warning("reddit public json failed on r/%s (%s)", sub, exc)
                 continue
-        if not got_any:
+        if not subs_ok:
             return None
-        log.info("reddit: public-JSON (no-auth) mode, %d posts", len(out))
-        return out
+        log.info("reddit: public-JSON (no-auth) mode, %d posts from %d subs",
+                 len(out), subs_ok)
+        return out, subs_ok
 
-    def _fetch_rss(self, subreddits, cutoff, limit_per_sub) -> list[Mention] | None:
-        """No-auth workaround: Reddit's Atom feeds evade the JSON IP-blocks."""
+    def _fetch_rss(self, subreddits, cutoff,
+                   limit_per_sub) -> tuple[list[Mention], int] | None:
+        """No-auth workaround: Reddit's Atom feeds evade the JSON IP-blocks.
+
+        Returns (mentions, subs_ok). Reddit rate-limits the feeds hard from
+        shared/datacenter IPs, so pacing is deliberately slow (once per day,
+        the extra ~1-2 min of runtime is irrelevant, coverage is not).
+        """
         try:  # pragma: no cover - requires live network
             import requests
         except Exception:
@@ -231,34 +248,32 @@ class RedditAdapter:
 
         ua = self.secrets.get("REDDIT_USER_AGENT") or _DEFAULT_UA
         out: list[Mention] = []
-        got_any = False
-        for sub in subreddits:
+        subs_ok = 0
+        for i, sub in enumerate(subreddits):
+            if i:
+                time.sleep(8)                 # generous spacing between feeds
             try:  # pragma: no cover - live network
-                r = requests.get(
-                    f"https://www.reddit.com/r/{sub}/new/.rss",
-                    headers={"User-Agent": ua},
-                    params={"limit": min(limit_per_sub, 100)},
-                    timeout=15,
-                )
-                if r.status_code == 429:      # rate-limited: back off, retry once
-                    time.sleep(4)
+                r = None
+                for attempt in range(3):
                     r = requests.get(
                         f"https://www.reddit.com/r/{sub}/new/.rss",
                         headers={"User-Agent": ua},
                         params={"limit": min(limit_per_sub, 100)},
                         timeout=15,
                     )
-                if r.status_code != 200:
-                    log.warning("reddit rss %s on r/%s", r.status_code, sub)
-                    time.sleep(1)
+                    if r.status_code != 429:
+                        break
+                    time.sleep(20 * (attempt + 1))   # 429: back off and retry
+                if r is None or r.status_code != 200:
+                    log.warning("reddit rss %s on r/%s",
+                                r.status_code if r is not None else "?", sub)
                     continue
                 out.extend(_parse_reddit_atom(r.content, sub, cutoff))
-                got_any = True
-                time.sleep(1)  # be polite to the feed endpoint
+                subs_ok += 1
             except Exception as exc:  # pragma: no cover
                 log.warning("reddit rss failed on r/%s (%s)", sub, exc)
                 continue
-        if not got_any:
+        if not subs_ok:
             return None
-        log.info("reddit: RSS (no-auth) mode, %d posts", len(out))
-        return out
+        log.info("reddit: RSS (no-auth) mode, %d posts from %d subs", len(out), subs_ok)
+        return out, subs_ok

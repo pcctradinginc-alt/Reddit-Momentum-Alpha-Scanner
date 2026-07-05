@@ -43,7 +43,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15   # RSS fallback paces slowly when rate-limited
     env:
       RMAS_OFFLINE: "false"
       LOG_LEVEL: INFO
