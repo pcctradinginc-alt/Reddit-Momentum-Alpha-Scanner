@@ -14,6 +14,8 @@ def _res(reddit_mode: str, market_mode: str) -> ScanResult:
 def test_actionable_requires_reddit_AND_market_live():
     assert _res("oauth", "live").actionable
     assert _res("public_json", "live").actionable
+    assert _res("rss", "live").actionable
+    assert not _res("rss", "synthetic").actionable
     # live Reddit but synthetic market data = fake-confirmed signals -> blocked
     assert not _res("oauth", "synthetic").actionable
     assert not _res("public_json", "synthetic").actionable

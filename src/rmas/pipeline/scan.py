@@ -67,7 +67,7 @@ class ScanResult:
     plans: list[TradePlan] = field(default_factory=list)
     regime: RegimeState | None = None
     rejected: dict[str, int] = field(default_factory=dict)
-    reddit_mode: str = "synthetic"      # "oauth" | "public_json" | "synthetic"
+    reddit_mode: str = "synthetic"      # "oauth" | "public_json" | "rss" | "synthetic"
     market_mode: str = "synthetic"      # "live" | "synthetic"
 
     @property
@@ -75,7 +75,9 @@ class ScanResult:
         """Real alerts need BOTH a live attention radar (Reddit) AND live
         market data — a Reddit-live/market-synthetic mix would email
         real-looking but fake-confirmed signals."""
-        return self.reddit_mode in ("oauth", "public_json") and self.market_mode == "live"
+        from rmas.data.reddit_source import LIVE_MODES
+
+        return self.reddit_mode in LIVE_MODES and self.market_mode == "live"
 
     def summary(self) -> str:
         flag = "" if self.actionable else "  [DEGRADED: synthetic inputs — NOT actionable]"
