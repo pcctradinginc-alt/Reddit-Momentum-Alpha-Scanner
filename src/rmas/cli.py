@@ -163,7 +163,20 @@ def _cmd_doctor(args) -> int:
     hype = ApeWisdomAdapter(secrets, offline=off)
     top = hype.top()
     row("apewisdom hype list", bool(top),
-        f"n={len(top)} rank({t})={hype.rank(t)}")
+        f"n={len(top)} rank({t})={hype.rank(t)} growth={hype.growth(t)}")
+
+    from rmas.data.finra_short import FinraShortInterest
+    from rmas.data.sec_edgar import SECEdgarAdapter
+    sec = SECEdgarAdapter(secrets, offline=off)
+    dse = sec.days_since_earnings(t)
+    fil = sec.recent_filings(t, days=7)
+    row("sec edgar filings", dse is not None or bool(fil),
+        f"days_since_earnings={dse} filings_7d={[f['form'] for f in fil]}")
+    finra = FinraShortInterest(secrets, offline=off)
+    si = finra.latest(t)
+    row("finra short interest", si is not None,
+        (f"short={si['short_shares'] / 1e6:.1f}M dtc={si['days_to_cover']} "
+         f"asof={si['settlement_date']}") if si else "n/a")
 
     import importlib.util
     trends = TrendsAdapter(secrets, offline=off)

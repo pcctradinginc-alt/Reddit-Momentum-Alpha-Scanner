@@ -32,7 +32,9 @@ from rmas.data.fundamentals_finnhub import FinnhubFundamentals
 from rmas.data.market_alpaca import AlpacaAdapter
 from rmas.data.news_source import NewsAdapter
 from rmas.data.options_tradier import TradierAdapter
+from rmas.data.finra_short import FinraShortInterest
 from rmas.data.reddit_source import RedditAdapter
+from rmas.data.sec_edgar import SECEdgarAdapter, filings_as_headlines
 from rmas.data.trends_source import TrendsAdapter
 from rmas.data.x_source import XAttentionAdapter
 from rmas.features.catalyst import detect_catalyst
@@ -159,6 +161,8 @@ def run_scan(
     funda = FinnhubFundamentals(secrets, offline=off)
     hype = ApeWisdomAdapter(secrets, offline=off)
     xattn = XAttentionAdapter(secrets, offline=off)
+    sec = SECEdgarAdapter(secrets, offline=off)
+    finra = FinraShortInterest(secrets, offline=off)
 
     xcfg = ExtractionConfig.from_universe(cfg.to_dict())
 
@@ -330,12 +334,19 @@ def run_scan(
         ), prefer_divergence=cfg.cross_source.get("prefer_divergence", True),
            penalize_broad=cfg.cross_source.get("penalize_broad_euphoria", True))
 
-        cat = detect_catalyst([m.text for m in ms], headlines)
+        # real SEC filings beat reddit chatter as catalyst evidence; kept out
+        # of `headlines` so the mainstream/news-count checks stay pure news
+        filings = sec.recent_filings(ticker, days=7, asof=asof.date())
+        cat = detect_catalyst([m.text for m in ms],
+                              headlines + filings_as_headlines(filings))
 
         # X watchlist inflow: additive-only confirmation bonus (0 when
         # unknown/offline) — by contract it can never REDUCE a rank, so no
         # alpha is lost when the X channel is dark.
         x_watchers = xattn.watchers_growth(ticker, asof.date())
+        # ApeWisdom mention growth includes COMMENTS (which our RSS radar
+        # can't see) — additive-only confirmation, 0 when unknown.
+        hype_growth = hype.growth(ticker)
 
         cand = Candidate(
             ticker=ticker, asof=asof, signal_time=SignalTime.INTRADAY,
@@ -344,14 +355,16 @@ def run_scan(
                       "cross_source_earliness": cs["cross_source_earliness"],
                       "catalyst_score": cat.score,
                       "x_watchers_growth": x_watchers,
+                      "hype_growth": hype_growth,
                       "_raw_rel_strength": mfeat.get("_raw_rel_strength", 0.0)},
         )
         # blended rank score (rewards earliness + real catalyst) plus the
-        # bounded X-confirmation bonus on top.
+        # bounded, additive-only confirmation bonuses on top.
         cand.rank_score = round(
             0.35 * dgate.score + 0.30 * tgate.score + 0.20 * tr_gate.score
             + 0.10 * cs["cross_source_earliness"] + 0.05 * cat.score
-            + float(cfg.cross_source.get("x_watchers_bonus", 0.05)) * x_watchers, 4
+            + float(cfg.cross_source.get("x_watchers_bonus", 0.05)) * x_watchers
+            + float(cfg.cross_source.get("hype_growth_bonus", 0.03)) * hype_growth, 4
         )
         candidates.append(cand)
 
@@ -371,10 +384,15 @@ def run_scan(
 
     for cand in candidates:
         atr = cand.features.get("_raw_atr", 0.0) or cand.features.get("_raw_close", 1.0) * 0.03
+        # real fundamentals for the strategy filters (cached; None -> honest 0)
+        shares_out = funda.shares_outstanding(cand.ticker)
+        si_pct = finra.short_interest_pct(cand.ticker, shares_out)
         ctx = StrategyContext(
             close=cand.features.get("_raw_close", 0.0),
             atr=atr,
-            short_interest_pct=0.0,
+            short_interest_pct=si_pct or 0.0,
+            float_shares=shares_out or 0.0,
+            days_since_earnings=sec.days_since_earnings(cand.ticker, asof.date()),
             call_imbalance=cand.features.get("_raw_call_put_imbalance", 0.0),
             parabolic_5d_pct=cand.features.get("_raw_r5", 0.0) * 100.0,
             regime_multiplier=regime.size_multiplier if cfg.regime.get("scale_size_by_regime", True) else 1.0,

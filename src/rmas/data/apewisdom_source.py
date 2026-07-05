@@ -76,3 +76,17 @@ class ApeWisdomAdapter:
     def rank(self, ticker: str) -> int | None:
         entry = self.top().get(ticker.upper())
         return entry["rank"] if entry else None
+
+    def growth(self, ticker: str) -> float:
+        """[0,1] mention-growth score vs 24h ago — INCLUDES comments, which
+        the RSS radar can't see. 0 when unknown; 1.0 at 3x growth. Bounded
+        and additive-only by the callers' contract."""
+        entry = self.top().get(ticker.upper())
+        if not entry:
+            return 0.0
+        prev = entry.get("mentions_24h_ago") or 0
+        cur = entry.get("mentions") or 0
+        if prev <= 0 or cur <= 0:
+            return 0.0
+        ratio = cur / prev
+        return round(min(1.0, max(0.0, (ratio - 1.0) / 2.0)), 4)

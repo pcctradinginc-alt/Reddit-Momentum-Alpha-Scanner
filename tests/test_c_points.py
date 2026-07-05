@@ -118,9 +118,10 @@ def test_author_cold_start_flat(tmp_path):
     assert s.authors_series("GME", today, days=7) == [20.0] * 7
 
 
-# ----------------------------------------------------- strategy enabled flag
-def test_strategy_b_disabled_in_config():
+# ----------------------------------------------------- strategy enabled flags
+def test_strategy_flags_reflect_data_reality():
     cfg = load_config()
     strategies = cfg.to_dict()["strategies"]
-    assert strategies["B_squeeze_watch"]["enabled"] is False
+    # B re-enabled since FINRA provides real short interest
+    assert strategies["B_squeeze_watch"]["enabled"] is True
     assert strategies["A_early_momentum_long"]["enabled"] is True
