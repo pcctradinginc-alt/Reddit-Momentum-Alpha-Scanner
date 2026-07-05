@@ -170,7 +170,13 @@ def _cmd_doctor(args) -> int:
     has_pytrends = importlib.util.find_spec("pytrends") is not None
     row("google trends", not off and has_pytrends,
         f"z={trends.google_trends_z(t)}" + ("" if has_pytrends else " (pytrends not installed)"))
-    row("x attention", False, f"z={trends.x_attention_z(t)} (no impl; neutral live)")
+    from rmas.data.x_source import XAttentionAdapter
+    xattn = XAttentionAdapter(secrets, offline=off)
+    xm = xattn.metrics(t)
+    row("x/stocktwits attention", xm is not None,
+        (f"msgs24h={int(xm['msgs_24h'])} users={int(xm['users_24h'])} "
+         f"watchers={int(xm['watchers'])} bullish={xm['bullish_pct']}% "
+         f"z={xattn.attention_z(t)}") if xm else "n/a (neutral)")
 
     reddit = RedditAdapter(secrets, offline=off)
     subs = list(cfg.universe.subreddits)[:2]

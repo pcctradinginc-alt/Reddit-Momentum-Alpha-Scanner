@@ -83,6 +83,8 @@ timing_risk:
 cross_source:
   prefer_divergence: true        # reddit-early, others-quiet = good
   penalize_broad_euphoria: true  # everyone screaming at once = late
+  x_watchers_bonus: 0.05         # additive rank bonus for X/StockTwits watchlist
+                                 # inflow (0 when unknown -> alpha-safe)
 
 # ---- Regime filter ----
 regime:

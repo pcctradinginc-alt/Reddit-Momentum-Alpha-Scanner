@@ -34,6 +34,7 @@ from rmas.data.news_source import NewsAdapter
 from rmas.data.options_tradier import TradierAdapter
 from rmas.data.reddit_source import RedditAdapter
 from rmas.data.trends_source import TrendsAdapter
+from rmas.data.x_source import XAttentionAdapter
 from rmas.features.catalyst import detect_catalyst
 from rmas.features.cross_source import CrossSourceInput, cross_source_score
 from rmas.features.discovery import DiscoveryInput, EarlyAttention, build_discovery_features
@@ -157,6 +158,7 @@ def run_scan(
     trends = TrendsAdapter(secrets, offline=off)
     funda = FinnhubFundamentals(secrets, offline=off)
     hype = ApeWisdomAdapter(secrets, offline=off)
+    xattn = XAttentionAdapter(secrets, offline=off)
 
     xcfg = ExtractionConfig.from_universe(cfg.to_dict())
 
@@ -251,6 +253,12 @@ def run_scan(
     # Benchmarks fetched ONCE per scan (cached), not per ticker.
     bench = market.benchmark_returns(20)
 
+    # Build X-attention history for every capped candidate (not just the
+    # final greens): the z-scores need day-over-day observations for the
+    # recurring names, and 25 keyless StockTwits calls/day are free.
+    for d in discovered:
+        xattn.metrics(d.ticker, asof.date())
+
     candidates: list[Candidate] = []
     for d in discovered:
         ticker, ms, dfeat, dgate, mentions_daily = d.ticker, d.ms, d.dfeat, d.dgate, d.mentions_daily
@@ -317,12 +325,17 @@ def run_scan(
         cs = cross_source_score(CrossSourceInput(
             reddit_attention_z=dfeat.get("_raw_mention_z_7d", 0.0),
             google_trends_z=trends.google_trends_z(ticker),
-            x_attention_z=trends.x_attention_z(ticker),
+            x_attention_z=xattn.attention_z(ticker, asof.date()),
             news_count_z=float(len(headlines)) - 1.0,
         ), prefer_divergence=cfg.cross_source.get("prefer_divergence", True),
            penalize_broad=cfg.cross_source.get("penalize_broad_euphoria", True))
 
         cat = detect_catalyst([m.text for m in ms], headlines)
+
+        # X watchlist inflow: additive-only confirmation bonus (0 when
+        # unknown/offline) — by contract it can never REDUCE a rank, so no
+        # alpha is lost when the X channel is dark.
+        x_watchers = xattn.watchers_growth(ticker, asof.date())
 
         cand = Candidate(
             ticker=ticker, asof=asof, signal_time=SignalTime.INTRADAY,
@@ -330,12 +343,15 @@ def run_scan(
             features={**feats,
                       "cross_source_earliness": cs["cross_source_earliness"],
                       "catalyst_score": cat.score,
+                      "x_watchers_growth": x_watchers,
                       "_raw_rel_strength": mfeat.get("_raw_rel_strength", 0.0)},
         )
-        # blended rank score (rewards earliness + real catalyst).
+        # blended rank score (rewards earliness + real catalyst) plus the
+        # bounded X-confirmation bonus on top.
         cand.rank_score = round(
             0.35 * dgate.score + 0.30 * tgate.score + 0.20 * tr_gate.score
-            + 0.10 * cs["cross_source_earliness"] + 0.05 * cat.score, 4
+            + 0.10 * cs["cross_source_earliness"] + 0.05 * cat.score
+            + float(cfg.cross_source.get("x_watchers_bonus", 0.05)) * x_watchers, 4
         )
         candidates.append(cand)
 
