@@ -34,9 +34,16 @@ from rmas.mathx import clip, zscore
 log = get_logger("data.x")
 
 _STREAM_URL = "https://api.stocktwits.com/api/2/streams/symbol/{sym}.json"
-# StockTwits 403s the default python-requests UA; a browser UA is served.
-_UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                     "AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36"}
+# StockTwits 403s the default python-requests UA; browser-like headers are
+# served (their CDN also checks Accept/Referer for some IP ranges).
+_UA = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://stocktwits.com/",
+    "Origin": "https://stocktwits.com",
+}
 X_HISTORY_PATH = ROOT / "data" / "state" / "x_history.json"       # [msgs, users]
 X_WATCHERS_PATH = ROOT / "data" / "state" / "x_watchers.json"     # [watchers, 0]
 MAX_PAGES = 3               # 30 msgs/page; >=90 msgs/24h recorded as capped 90
@@ -109,6 +116,7 @@ class XAttentionAdapter:
                     r = requests.get(_STREAM_URL.format(sym=ticker),
                                      params=params, headers=_UA, timeout=8)
                 if r.status_code != 200:
+                    log.warning("stocktwits %s for %s", r.status_code, ticker)
                     break
                 page = r.json()
                 pages.append(page)
