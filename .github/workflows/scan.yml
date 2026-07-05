@@ -108,6 +108,19 @@ jobs:
           restore-keys: |
             rmas-state-
 
+      # X attention is collected on the local rail (StockTwits 403s
+      # datacenter IPs) and published to the x-state branch by
+      # scripts/xfeed_push.sh. Missing branch/stale data -> signal neutral.
+      - name: Restore X attention state (fed from local rail)
+        if: steps.cal.outputs.open != 'false'
+        run: |
+          if git fetch origin x-state --depth 1 2>/dev/null; then
+            git checkout FETCH_HEAD -- data/state/x_history.json data/state/x_watchers.json 2>/dev/null \
+              && echo "x-state restored" || echo "x-state branch has no state files yet"
+          else
+            echo "no x-state branch yet — X signal stays neutral"
+          fi
+
       - name: Run scan + alert
         if: steps.cal.outputs.open != 'false'
         run: |

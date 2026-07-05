@@ -140,22 +140,32 @@ class XAttentionAdapter:
         ticker = ticker.upper()
         if ticker in self._memo:
             return self._memo[ticker]
-        if self.offline or self._dead:
+        if self.offline:
             self._memo[ticker] = None
             return None
         asof = asof or datetime.now(timezone.utc).date()
-        time.sleep(0.5)                     # politeness pacing between tickers
-        pages = self._fetch_stream(ticker)
+
+        pages = None
+        if not self._dead:
+            time.sleep(0.5)                 # politeness pacing between tickers
+            pages = self._fetch_stream(ticker)
+            if pages is None:
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= 3:
+                    self._dead = True
+                    log.warning("x/stocktwits source down after %d consecutive "
+                                "failures — feeder state / neutral for this run",
+                                self._consecutive_failures)
+            else:
+                self._consecutive_failures = 0
         if pages is None:
-            self._memo[ticker] = None
-            self._consecutive_failures += 1
-            if self._consecutive_failures >= 3:
-                self._dead = True
-                log.warning("x/stocktwits source down after %d consecutive "
-                            "failures — neutral for the rest of this run",
-                            self._consecutive_failures)
-            return None
-        self._consecutive_failures = 0
+            # Feeder fallback: StockTwits blocks datacenter IPs (CI runners),
+            # so a LOCAL machine records today's metrics into the state files
+            # and publishes them via the `x-state` git branch. If today's
+            # value is already in the store, consume it as real data.
+            stored = self._from_store(ticker, asof)
+            self._memo[ticker] = stored
+            return stored
         m = _metrics_from_messages(pages, datetime.now(timezone.utc))
         self._history.record(asof, {ticker: int(m["msgs_24h"])},
                              {ticker: int(m["users_24h"])})
@@ -164,6 +174,20 @@ class XAttentionAdapter:
         self._watchers.save()
         self._memo[ticker] = m
         return m
+
+    def _from_store(self, ticker: str, asof: date) -> dict | None:
+        """Reconstruct today's metrics from state recorded by the local
+        feeder (rmas xfeed) when the live fetch is IP-blocked here."""
+        rec = self._history.day_value(ticker, asof)
+        if rec is None:
+            return None
+        watchers = self._watchers.day_value(ticker, asof)
+        return {
+            "msgs_24h": rec[0],
+            "users_24h": rec[1] or 0.0,
+            "watchers": watchers[0] if watchers else 0.0,
+            "bullish_pct": None,
+        }
 
     # ------------------------------------------------------------------ #
     def attention_z(self, ticker: str, asof: date | None = None) -> float:

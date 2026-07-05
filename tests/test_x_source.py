@@ -103,6 +103,26 @@ def test_watchers_growth_bounded_and_additive_only(tmp_path):
     assert a2.watchers_growth("ABC", today) == 0.0  # never negative -> additive-only
 
 
+def test_feeder_state_consumed_when_fetch_blocked(tmp_path, monkeypatch):
+    """CI case: StockTwits 403s the runner IP, but the local feeder already
+    pushed today's numbers into the state files -> real data, real z."""
+    monkeypatch.setattr("rmas.data.x_source.time.sleep", lambda s: None)
+    a = _adapter(tmp_path)
+    d0 = date(2026, 7, 10)
+    for i in range(8):                             # feeder history
+        a._history.record(d0 + timedelta(days=i), {"XYZ": 5}, {"XYZ": 4})
+        a._watchers.record(d0 + timedelta(days=i), {"XYZ": 1000})
+    today = d0 + timedelta(days=8)
+    a._history.record(today, {"XYZ": 42}, {"XYZ": 30})   # today's feeder data
+    a._watchers.record(today, {"XYZ": 1100})
+
+    a._fetch_stream = lambda t: None               # runner IP blocked
+    m = a.metrics("XYZ", today)
+    assert m is not None and m["msgs_24h"] == 42.0 and m["watchers"] == 1100.0
+    assert a.attention_z("XYZ", today) == 3.0      # spike vs quiet history
+    assert a.watchers_growth("XYZ", today) == 1.0  # +10% watchers -> full bonus
+
+
 def test_circuit_breaker_after_three_failures(tmp_path, monkeypatch):
     monkeypatch.setattr("rmas.data.x_source.time.sleep", lambda s: None)
     a = _adapter(tmp_path)

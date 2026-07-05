@@ -99,6 +99,30 @@ def _cmd_backtest(args) -> int:
     return demo_main()
 
 
+def _cmd_xfeed(args) -> int:
+    """Collect X/StockTwits attention for the trending names into the local
+    state files. Runs on a machine whose IP StockTwits serves (home network) —
+    GitHub runners are blocked — and is published to CI via scripts/xfeed_push.sh."""
+    from rmas.data.apewisdom_source import ApeWisdomAdapter
+    from rmas.data.x_source import XAttentionAdapter
+
+    secrets = Secrets()
+    off = bool(args.offline) if args.offline is not None else False
+    hype = ApeWisdomAdapter(secrets, offline=off)
+    xattn = XAttentionAdapter(secrets, offline=off)
+
+    tickers = list(hype.top().keys())[: args.top]
+    if not tickers:
+        print("xfeed: no trending tickers available (offline or apewisdom down)")
+        return 1
+    ok = 0
+    for t in tickers:
+        if xattn.metrics(t) is not None:
+            ok += 1
+    print(f"xfeed: recorded X attention for {ok}/{len(tickers)} tickers")
+    return 0 if ok else 1
+
+
 def _cmd_doctor(args) -> int:
     """Live data diagnostics: probe every adapter and report LIVE vs FALLBACK.
 
@@ -219,6 +243,9 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="probe every live data path with a sample ticker")
     d.add_argument("--ticker", default="NVDA")
     d.set_defaults(func=_cmd_doctor)
+    x = sub.add_parser("xfeed", help="record X/StockTwits attention for trending tickers")
+    x.add_argument("--top", type=int, default=40)
+    x.set_defaults(func=_cmd_xfeed)
     sub.add_parser("backtest", help="demo walk-forward backtest").set_defaults(func=_cmd_backtest)
     sub.add_parser("selfcheck", help="end-to-end offline smoke test").set_defaults(func=_cmd_selfcheck)
     return p

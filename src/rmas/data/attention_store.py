@@ -93,6 +93,13 @@ class AttentionStore:
         key = before.isoformat()
         return sum(1 for d in self._data.get(ticker, {}) if d < key)
 
+    def day_value(self, ticker: str, asof: date) -> tuple[float, float | None] | None:
+        """(mentions, authors) recorded for exactly `asof`, or None."""
+        v = self._data.get(ticker, {}).get(asof.isoformat())
+        if v is None:
+            return None
+        return _mentions_of(v), _authors_of(v)
+
     def series(self, ticker: str, asof: date, days: int = 30) -> list[float]:
         """Daily mention series of length `days`, ending at `asof` (inclusive).
 
