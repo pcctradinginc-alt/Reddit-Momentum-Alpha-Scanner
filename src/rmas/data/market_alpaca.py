@@ -25,6 +25,22 @@ log = get_logger("data.alpaca")
 _OFFLINE_BENCHMARKS = {"SPY": 0.01, "QQQ": 0.012, "SECTOR": 0.008}
 
 
+def _is_regular_hours(quote_ts: str) -> bool:
+    """True when an ISO quote timestamp falls inside US regular trading hours
+    (09:30-16:00 ET, weekday). Pure so it is unit-testable."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        t = datetime.fromisoformat(quote_ts.replace("Z", "+00:00"))
+        et = t.astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        return False
+    if et.weekday() >= 5:
+        return False
+    tod = (et.hour, et.minute)
+    return (9, 30) <= tod < (16, 0)
+
+
 class AlpacaAdapter:
     def __init__(self, secrets: Secrets | None = None, offline: bool | None = None):
         self.secrets = secrets or Secrets()
@@ -182,7 +198,13 @@ class AlpacaAdapter:
 
     # ------------------------------------------------------------------ #
     def spread_bps(self, ticker: str) -> float | None:
-        """Bid/ask spread in bps from the latest quote (live only)."""
+        """Bid/ask spread in bps from the latest REGULAR-HOURS quote.
+
+        Quotes from pre/after-market or weekends carry artificially wide
+        spreads (a stale Saturday NVDA quote showed 838 bps!) and would trip
+        the max-spread hard filter for perfectly liquid names. Outside RTH we
+        return None -> the gate treats spread as unknown/neutral and the
+        $-volume + market-cap filters carry the liquidity duty."""
         if not self._live:
             return None
         try:  # pragma: no cover - live network
@@ -195,6 +217,8 @@ class AlpacaAdapter:
             q = r.json().get("quote", {})
             bid, ask = float(q.get("bp", 0)), float(q.get("ap", 0))
             if bid <= 0 or ask <= 0 or ask < bid:
+                return None
+            if not _is_regular_hours(q.get("t", "")):
                 return None
             mid = (bid + ask) / 2.0
             return (ask - bid) / mid * 10_000.0

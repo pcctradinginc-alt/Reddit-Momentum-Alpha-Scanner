@@ -67,8 +67,24 @@ class TradierAdapter:
             ]
             atm_spread = sorted(spreads)[len(spreads) // 2] if spreads else 50.0
 
-            ivs = [g.get("mid_iv") for o in options if (g := o.get("greeks")) and g.get("mid_iv")]
-            iv_rank = min(100.0, (sum(ivs) / len(ivs)) * 100) if ivs else 0.0
+            # REAL IV rank: today's median chain IV vs this ticker's own
+            # recorded history. The old code returned the IV *level* as
+            # "rank", pinning high-vol names at 100 and falsely tripping the
+            # max_iv_rank gate. Until enough history exists -> neutral 50.
+            ivs = sorted(g.get("mid_iv") for o in options
+                         if (g := o.get("greeks")) and g.get("mid_iv"))
+            iv_rank = 50.0                          # neutral: unknown, never gates
+            if ivs:
+                median_iv = ivs[len(ivs) // 2]
+                from rmas.data.iv_store import IVStore
+
+                store = IVStore()
+                today = datetime.now(timezone.utc).date()
+                rank = store.rank(ticker, median_iv, today)
+                store.record(today, ticker, median_iv)
+                store.save()
+                if rank is not None:
+                    iv_rank = rank
 
             return OptionsSnapshot(
                 ticker=ticker,

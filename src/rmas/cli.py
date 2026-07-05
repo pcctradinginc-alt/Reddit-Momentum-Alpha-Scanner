@@ -165,8 +165,11 @@ def _cmd_doctor(args) -> int:
     row("apewisdom hype list", bool(top),
         f"n={len(top)} rank({t})={hype.rank(t)}")
 
+    import importlib.util
     trends = TrendsAdapter(secrets, offline=off)
-    row("google trends", not off, f"z={trends.google_trends_z(t)}")
+    has_pytrends = importlib.util.find_spec("pytrends") is not None
+    row("google trends", not off and has_pytrends,
+        f"z={trends.google_trends_z(t)}" + ("" if has_pytrends else " (pytrends not installed)"))
     row("x attention", False, f"z={trends.x_attention_z(t)} (no impl; neutral live)")
 
     reddit = RedditAdapter(secrets, offline=off)
