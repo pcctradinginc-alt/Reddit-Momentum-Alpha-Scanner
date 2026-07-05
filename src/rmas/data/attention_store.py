@@ -36,8 +36,20 @@ def _median(xs: list[float]) -> float:
     return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
 
 
+def _mentions_of(v) -> float:
+    """Day value -> mention count. v is legacy float or [mentions, authors]."""
+    return float(v[0]) if isinstance(v, list) else float(v)
+
+
+def _authors_of(v) -> float | None:
+    """Day value -> unique-author count, None for legacy entries."""
+    return float(v[1]) if isinstance(v, list) and len(v) > 1 else None
+
+
 class AttentionStore:
-    """{ticker: {"YYYY-MM-DD": count}} with pruning + padded series access."""
+    """{ticker: {"YYYY-MM-DD": [mentions, authors]}} with pruning + padded
+    series access. Legacy plain-float day values (schema v1) are read as
+    mentions-only."""
 
     def __init__(self, path: Path | None = None):
         self.path = path or STATE_PATH
@@ -60,11 +72,14 @@ class AttentionStore:
             log.warning("attention store save failed (%s)", exc)
 
     # ------------------------------------------------------------------ #
-    def record(self, asof: date, counts: dict[str, int]) -> None:
-        """Record today's observed mention counts and prune old days."""
+    def record(self, asof: date, counts: dict[str, int],
+               authors: dict[str, int] | None = None) -> None:
+        """Record today's observed mention (and unique-author) counts."""
         key = asof.isoformat()
+        authors = authors or {}
         for ticker, n in counts.items():
-            self._data.setdefault(ticker, {})[key] = float(n)
+            self._data.setdefault(ticker, {})[key] = [
+                float(n), float(authors.get(ticker, 0))]
         cutoff = (asof - timedelta(days=KEEP_DAYS)).isoformat()
         for ticker in list(self._data):
             days = {d: v for d, v in self._data[ticker].items() if d >= cutoff}
@@ -85,17 +100,27 @@ class AttentionStore:
         fewer than MIN_HISTORY_DAYS observations the whole series is padded
         flat with today's count -> z ~ 0 -> conservative cold start.
         """
+        return self._padded_series(ticker, asof, days, _mentions_of)
+
+    def authors_series(self, ticker: str, asof: date, days: int = 7) -> list[float]:
+        """Daily unique-author series — same padding/cold-start rules."""
+        return self._padded_series(ticker, asof, days, _authors_of)
+
+    def _padded_series(self, ticker: str, asof: date, days: int,
+                       extract) -> list[float]:
         rec = self._data.get(ticker, {})
         today_key = asof.isoformat()
-        today = rec.get(today_key, 0.0)
+        today = extract(rec.get(today_key, 0.0)) or 0.0
 
-        if self.observed_days(ticker, asof) < MIN_HISTORY_DAYS:
+        observed = [extract(v) for d, v in rec.items() if d < today_key]
+        observed = [v for v in observed if v is not None]
+        if len(observed) < MIN_HISTORY_DAYS:
             return [float(today)] * days
 
-        history = [v for d, v in rec.items() if d < today_key]
-        pad = _median(history)
+        pad = _median(observed)
         out: list[float] = []
         for i in range(days - 1, -1, -1):
             key = (asof - timedelta(days=i)).isoformat()
-            out.append(float(rec.get(key, pad)))
+            v = extract(rec[key]) if key in rec else None
+            out.append(float(v) if v is not None else pad)
         return out

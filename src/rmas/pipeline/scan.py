@@ -45,6 +45,7 @@ from rmas.features.regime import (
     classify_regime,
     regime_input_from_bars,
 )
+from rmas.features.sector_map import sector_etf
 from rmas.logging_setup import get_logger
 from rmas.nlp.bot_detection import BotConfig, bot_ratio, score_mentions
 from rmas.nlp.ticker_extraction import ExtractionConfig, extract_tickers
@@ -105,6 +106,24 @@ def _assign_tickers(mentions: list[Mention], xcfg: ExtractionConfig) -> list[Men
     return out
 
 
+def _hourly_counts(ms: list[Mention], asof: datetime, hours: int = 7,
+                   submissions: bool = True) -> list[float]:
+    """REAL per-hour counts from mention timestamps (oldest -> newest).
+
+    Replaces the previous fabricated hourly series. `submissions` selects
+    posts vs comments; RSS mode has no comments -> that series is all-zero
+    (z=0, honestly uninformative) until OAuth ingestion adds them.
+    """
+    buckets = [0.0] * hours
+    for m in ms:
+        if m.is_submission != submissions:
+            continue
+        age_h = (asof - m.created_utc).total_seconds() / 3600.0
+        if 0 <= age_h < hours:
+            buckets[hours - 1 - int(age_h)] += 1
+    return buckets
+
+
 def _entry_triggers(mom: dict[str, float]) -> list[str]:
     triggers: list[str] = []
     if mom.get("_raw_breakout_pct", 0.0) > 0:
@@ -158,7 +177,9 @@ def run_scan(
     store: AttentionStore | None = None
     if reddit.is_live:
         store = AttentionStore()
-        store.record(asof.date(), {t: len(ms) for t, ms in by_ticker.items()})
+        store.record(asof.date(),
+                     {t: len(ms) for t, ms in by_ticker.items()},
+                     {t: len({m.author for m in ms}) for t, ms in by_ticker.items()})
         store.save()
 
     # ---- regime (global): real SPY/QQQ inputs when market data is live ----
@@ -195,12 +216,18 @@ def run_scan(
         uniq_authors = len({m.author for m in ms})
         br = bot_ratio(ms)
 
+        if store is not None:
+            authors_daily = store.authors_series(ticker, asof.date(), days=7)
+        else:  # offline demo approximation
+            authors_daily = [float(max(1, uniq_authors - 2))] * 6 + [float(uniq_authors)]
+
         dinp = DiscoveryInput(
             ticker=ticker,
             mentions_daily=mentions_daily,
-            new_threads_hourly=[max(1, today_mentions // 8)] * 6 + [today_mentions // 4],
-            comments_hourly=[max(1, today_mentions // 4)] * 6 + [today_mentions // 2],
-            unique_authors_daily=[max(1, uniq_authors - 2)] * 6 + [uniq_authors],
+            # real per-hour counts from timestamps (no fabricated shapes)
+            new_threads_hourly=_hourly_counts(ms, asof, submissions=True),
+            comments_hourly=_hourly_counts(ms, asof, submissions=False),
+            unique_authors_daily=authors_daily,
             subreddit_count=len({m.subreddit for m in ms}),
             bot_ratio=br,
         )
@@ -236,9 +263,20 @@ def run_scan(
             market_cap_usd=funda.market_cap_usd(ticker),
             # consolidated 10d avg $-volume beats IEX-sliver bar volume
             dollar_volume_usd=funda.avg_dollar_volume_usd(ticker, last_close),
+            float_shares=funda.shares_outstanding(ticker),
         )
         opt = options.options_snapshot(ticker)
-        minp = MomentumInput(ticker=ticker, bars=bars, benchmark_returns=bench)
+
+        # real sector benchmark: industry -> SPDR ETF (falls back to SPY)
+        bench_t = dict(bench)
+        etf = sector_etf(funda.industry(ticker))
+        if etf:
+            bench_t["SECTOR"] = market.symbol_return(etf)
+
+        pm = market.premarket_volumes(ticker)
+        minp = MomentumInput(ticker=ticker, bars=bars, benchmark_returns=bench_t,
+                             premarket_volume=pm[0] if pm else 0.0,
+                             avg_premarket_volume=pm[1] if pm else 0.0)
         mfeat = build_momentum_features(minp)
         ofeat = build_options_features(opt)
         feats = {**mfeat, **ofeat}
@@ -310,6 +348,7 @@ def run_scan(
     # ---- strategy + blow-off + meta-label + rank ----
     candidates.sort(key=lambda c: c.rank_score, reverse=True)
     plans: list[TradePlan] = []
+    strat_cfg = cfg.to_dict().get("strategies", {}) or {}
     blowoff = BlowOffFade()
     min_p = cfg.meta_labeling.get("min_trade_probability", 0.55)
     use_meta = cfg.meta_labeling.get("enabled", True) and meta_model is not None
@@ -334,10 +373,13 @@ def run_scan(
             rejected["blowoff"] += 1
             continue
 
-        # pick the first registered long strategy that qualifies
+        # pick the first ENABLED long strategy that qualifies (the config
+        # enabled-flags are authoritative; the registry only lists code)
         chosen = None
         for name, strat in STRATEGY_REGISTRY.items():
             if getattr(strat, "direction", "long") != "long":
+                continue
+            if not strat_cfg.get(name, {}).get("enabled", True):
                 continue
             ok, why = strat.qualifies(cand, ctx)
             if ok:

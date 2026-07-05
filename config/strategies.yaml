@@ -16,7 +16,11 @@ strategies:
     weight: 1.0
 
   B_squeeze_watch:
-    enabled: true
+    # DISABLED until a real short-interest source exists: the pipeline has no
+    # live SI data (Finnhub free tier lacks it; FINRA files are unwired), so
+    # this strategy would judge on a hard-coded 0 — it can never fire, and
+    # pretending it's active is dishonest. Re-enable together with real data.
+    enabled: false
     description: "Reddit Squeeze — high short interest, small/mid float, call flow, breakout."
     instrument: equity_or_call_spread
     direction: long

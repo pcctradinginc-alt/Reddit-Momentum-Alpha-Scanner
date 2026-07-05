@@ -25,13 +25,16 @@ class FinnhubFundamentals:
     def _live(self) -> bool:
         return not self.offline and self.secrets.has("FINNHUB_API_KEY")
 
-    def market_cap_usd(self, ticker: str) -> float | None:
+    def profile(self, ticker: str) -> dict | None:
+        """Company profile (/stock/profile2, free tier), cached per day.
+
+        One request serves market cap, shares outstanding AND industry."""
         if not self._live:
             return None
         day = datetime.now(timezone.utc).date().isoformat()
-        cached = cache.get("finnhub_profile", f"{ticker}_{day}")
+        cached = cache.get("finnhub_profile2", f"{ticker}_{day}")
         if cached is not None:
-            return float(cached) or None
+            return cached or None
         try:  # pragma: no cover - live network
             import requests
 
@@ -41,13 +44,38 @@ class FinnhubFundamentals:
                 timeout=15,
             )
             r.raise_for_status()
-            cap_millions = float(r.json().get("marketCapitalization") or 0.0)
-            cap = cap_millions * 1_000_000.0
-            cache.put("finnhub_profile", f"{ticker}_{day}", cap)
-            return cap or None
+            p = r.json() or {}
+            cache.put("finnhub_profile2", f"{ticker}_{day}", p)
+            return p or None
         except Exception as exc:  # pragma: no cover
             log.warning("finnhub profile failed for %s (%s)", ticker, exc)
             return None
+
+    def market_cap_usd(self, ticker: str) -> float | None:
+        p = self.profile(ticker)
+        if not p:
+            return None
+        try:
+            cap = float(p.get("marketCapitalization") or 0.0) * 1_000_000.0
+        except (TypeError, ValueError):
+            return None
+        return cap or None
+
+    def shares_outstanding(self, ticker: str) -> float | None:
+        """Shares outstanding (an upper bound for float — Finnhub free has no
+        true free-float; callers must treat it as such)."""
+        p = self.profile(ticker)
+        if not p:
+            return None
+        try:
+            shares = float(p.get("shareOutstanding") or 0.0) * 1_000_000.0
+        except (TypeError, ValueError):
+            return None
+        return shares or None
+
+    def industry(self, ticker: str) -> str | None:
+        p = self.profile(ticker)
+        return (p or {}).get("finnhubIndustry") or None
 
     # ------------------------------------------------------------------ #
     def metrics(self, ticker: str) -> dict | None:

@@ -109,19 +109,76 @@ class AlpacaAdapter:
             return self._synthetic.daily_bars(ticker, lookback_days)
 
     # ------------------------------------------------------------------ #
+    def symbol_return(self, symbol: str, lookback: int = 20) -> float:
+        """`lookback`-day return for one symbol from (cached) daily bars."""
+        bars = self.daily_bars(symbol, lookback + 5)
+        if len(bars) > lookback:
+            return pct_change(bars[-1 - lookback].close, bars[-1].close)
+        return 0.0
+
     def benchmark_returns(self, lookback: int = 20) -> dict[str, float]:
         """Real SPY/QQQ `lookback`-day returns (live) or neutral defaults."""
         if not self._live:
             return dict(_OFFLINE_BENCHMARKS)
-        out: dict[str, float] = {}
-        for sym in ("SPY", "QQQ"):
-            bars = self.daily_bars(sym, lookback + 5)
-            if len(bars) > lookback:
-                out[sym] = pct_change(bars[-1 - lookback].close, bars[-1].close)
-            else:
-                out[sym] = 0.0
-        out["SECTOR"] = out.get("SPY", 0.0)  # sector proxy until sector ETFs are wired
+        out = {sym: self.symbol_return(sym, lookback) for sym in ("SPY", "QQQ")}
+        out["SECTOR"] = out.get("SPY", 0.0)  # per-ticker sector ETF overrides this
         return out
+
+    # ------------------------------------------------------------------ #
+    def premarket_volumes(self, ticker: str) -> tuple[float, float] | None:
+        """(today's premarket volume, avg over previous sessions) — or None.
+
+        Like-for-like: previous sessions are summed over the SAME
+        time-of-day window as today (04:00 ET .. now-16min, capped 09:30),
+        so a pre-market scan never compares a partial today against full
+        historical premarkets. One minute-bars request per ticker, live only.
+        """
+        if not self._live:
+            return None
+        try:  # pragma: no cover - live network
+            from zoneinfo import ZoneInfo
+
+            import requests
+
+            ny = ZoneInfo("America/New_York")
+            now_et = (datetime.now(timezone.utc) - timedelta(minutes=16)).astimezone(ny)
+            open_t, pm_start = (9, 30), (4, 0)
+            cutoff_tod = min((now_et.hour, now_et.minute), open_t)
+            if now_et.weekday() >= 5 or cutoff_tod <= pm_start:
+                return None                     # weekend / before premarket
+
+            data_url = self.secrets.get("ALPACA_DATA_URL", "https://data.alpaca.markets")
+            start = (now_et - timedelta(days=8)).date().isoformat()
+            end = (datetime.now(timezone.utc) - timedelta(minutes=16)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            sums: dict[str, float] = {}
+            for feed in ("sip", "iex"):
+                r = requests.get(
+                    f"{data_url}/v2/stocks/{ticker}/bars",
+                    headers=self._headers(),
+                    params={"timeframe": "1Min", "start": start, "end": end,
+                            "limit": 10000, "adjustment": "raw", "feed": feed},
+                    timeout=20,
+                )
+                if r.status_code != 200:
+                    continue
+                for b in r.json().get("bars", []):
+                    t = datetime.fromisoformat(b["t"].replace("Z", "+00:00")).astimezone(ny)
+                    tod = (t.hour, t.minute)
+                    if pm_start <= tod < cutoff_tod:
+                        key = t.date().isoformat()
+                        sums[key] = sums.get(key, 0.0) + float(b.get("v", 0))
+                break
+            if not sums:
+                return None
+            today_key = now_et.date().isoformat()
+            today_pm = sums.pop(today_key, 0.0)
+            prev = [sums[k] for k in sorted(sums)][-5:]
+            if not prev:
+                return None
+            return today_pm, sum(prev) / len(prev)
+        except Exception as exc:  # pragma: no cover
+            log.warning("alpaca premarket volume failed for %s (%s)", ticker, exc)
+            return None
 
     # ------------------------------------------------------------------ #
     def spread_bps(self, ticker: str) -> float | None:
@@ -148,17 +205,32 @@ class AlpacaAdapter:
     # ------------------------------------------------------------------ #
     def liquidity(self, ticker: str, bars: list[Bar] | None = None,
                   market_cap_usd: float | None = None,
-                  dollar_volume_usd: float | None = None) -> LiquiditySnapshot:
-        """Liquidity snapshot. Pass `bars` to reuse already-fetched data,
-        `market_cap_usd` / `dollar_volume_usd` from a fundamentals source
-        (consolidated volume beats IEX-sliver bar volume); missing pieces
-        fall back to synthetic values."""
+                  dollar_volume_usd: float | None = None,
+                  float_shares: float | None = None) -> LiquiditySnapshot:
+        """Liquidity snapshot. Pass `bars` to reuse already-fetched data and
+        fundamentals from a real source (consolidated volume beats IEX-sliver
+        bar volume).
+
+        Honesty rule: in LIVE mode, fields we have no real source for are
+        neutral (short_interest=0, borrow=True) — NEVER synthetic randoms
+        that downstream strategies could mistake for data. Synthetic values
+        exist only for offline demos/tests."""
         bars = bars or self.daily_bars(ticker, 5)
         if not bars:
             return self._synthetic.liquidity(ticker)
         last = bars[-1]
-        synth = self._synthetic.liquidity(ticker)
         spread = self.spread_bps(ticker)
+        if self._live:
+            return LiquiditySnapshot(
+                ticker=ticker,
+                market_cap_usd=market_cap_usd or 0.0,
+                dollar_volume_usd=dollar_volume_usd or last.close * last.volume,
+                bid_ask_spread_bps=spread if spread is not None else 0.0,
+                short_interest_pct=0.0,          # no real source yet
+                float_shares=float_shares or 0.0,  # shares outstanding (upper bound)
+                borrow_available=True,           # unknown -> neutral
+            )
+        synth = self._synthetic.liquidity(ticker)
         return LiquiditySnapshot(
             ticker=ticker,
             market_cap_usd=market_cap_usd if market_cap_usd else synth.market_cap_usd,

@@ -32,6 +32,10 @@ on:
         description: "Build report but do NOT send email"
         type: boolean
         default: false
+      doctor:
+        description: "Run data-path diagnostics instead of the scan"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -107,7 +111,10 @@ jobs:
       - name: Run scan + alert
         if: steps.cal.outputs.open != 'false'
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "${{ inputs.doctor }}" = "true" ]; then
+            echo "DOCTOR MODE — probing all live data paths"
+            rmas --live doctor
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "DRY RUN — no email will be sent"
             rmas --live alert --dry-run
           else

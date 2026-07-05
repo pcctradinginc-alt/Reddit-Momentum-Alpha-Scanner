@@ -99,6 +99,90 @@ def _cmd_backtest(args) -> int:
     return demo_main()
 
 
+def _cmd_doctor(args) -> int:
+    """Live data diagnostics: probe every adapter and report LIVE vs FALLBACK.
+
+    The daily scan only touches per-ticker APIs for discovery-green names, so
+    a cold-start scan exercises almost nothing — this command forces every
+    data path with one sample ticker and prints what is real."""
+    from rmas.data.apewisdom_source import ApeWisdomAdapter
+    from rmas.data.fundamentals_finnhub import FinnhubFundamentals
+    from rmas.data.market_alpaca import AlpacaAdapter
+    from rmas.data.news_source import NewsAdapter
+    from rmas.data.options_tradier import TradierAdapter
+    from rmas.data.reddit_source import RedditAdapter
+    from rmas.data.trends_source import TrendsAdapter
+    from rmas.features.sector_map import sector_etf
+
+    cfg = load_config()
+    secrets = Secrets()
+    off = bool(args.offline) if args.offline is not None else False
+    t = args.ticker.upper()
+    rows: list[tuple[str, str, str]] = []
+
+    def row(name: str, live: bool, detail: str) -> None:
+        rows.append((name, "LIVE" if live else "FALLBACK", detail))
+
+    market = AlpacaAdapter(secrets, offline=off)
+    bars = market.daily_bars(t, 60)
+    row("alpaca bars", market.feed_used is not None,
+        f"n={len(bars)} feed={market.feed_used or 'synthetic'} "
+        f"close={bars[-1].close if bars else '?'} vol={int(bars[-1].volume) if bars else '?'}")
+    spread = market.spread_bps(t)
+    row("alpaca quote spread", spread is not None,
+        f"{round(spread, 1)} bps" if spread is not None else "n/a")
+    bench = market.benchmark_returns(20)
+    row("benchmarks 20d", market.feed_used is not None,
+        f"SPY={bench.get('SPY', 0):+.3f} QQQ={bench.get('QQQ', 0):+.3f}")
+    pm = market.premarket_volumes(t)
+    row("premarket volume", pm is not None,
+        f"today={int(pm[0])} avg5d={int(pm[1])}" if pm else "n/a (closed/weekend or no data)")
+
+    funda = FinnhubFundamentals(secrets, offline=off)
+    cap = funda.market_cap_usd(t)
+    ind = funda.industry(t)
+    shares = funda.shares_outstanding(t)
+    advol = funda.avg_dollar_volume_usd(t, bars[-1].close if bars else 0.0)
+    row("finnhub profile", cap is not None,
+        f"cap={cap / 1e9:.1f}B sharesOut={int((shares or 0) / 1e6)}M industry={ind} "
+        f"sector_etf={sector_etf(ind)}" if cap else "n/a")
+    row("finnhub 10d $-volume", advol is not None,
+        f"{advol / 1e6:.0f}M$/day" if advol else "n/a")
+
+    options = TradierAdapter(secrets, offline=off)
+    snap = options.options_snapshot(t)
+    row("tradier options", getattr(options, "_live", False),
+        f"call_vol={int(snap.call_volume)} put_vol={int(snap.put_volume)} "
+        f"iv_rank={snap.iv_rank:.0f}")
+
+    news = NewsAdapter(secrets, offline=off)
+    hl = news.headlines(t)
+    row("news headlines", not off and (secrets.has("FINNHUB_API_KEY") or secrets.alpaca_ready),
+        f"n={len(hl)}")
+
+    hype = ApeWisdomAdapter(secrets, offline=off)
+    top = hype.top()
+    row("apewisdom hype list", bool(top),
+        f"n={len(top)} rank({t})={hype.rank(t)}")
+
+    trends = TrendsAdapter(secrets, offline=off)
+    row("google trends", not off, f"z={trends.google_trends_z(t)}")
+    row("x attention", False, f"z={trends.x_attention_z(t)} (no impl; neutral live)")
+
+    reddit = RedditAdapter(secrets, offline=off)
+    subs = list(cfg.universe.subreddits)[:2]
+    ms = reddit.fetch_mentions(subs, 24, limit_per_sub=30)
+    row("reddit radar", reddit.is_live,
+        f"mode={reddit.mode} coverage={reddit.coverage:.0%} posts={len(ms)} subs={subs}")
+
+    print(f"\nRMAS DOCTOR — sample ticker {t}\n" + "=" * 64)
+    for name, status, detail in rows:
+        print(f"  {name:<22} {status:<9} {detail}")
+    n_live = sum(1 for _, s, _ in rows if s == "LIVE")
+    print("=" * 64 + f"\n  {n_live}/{len(rows)} data paths LIVE\n")
+    return 0
+
+
 def _cmd_selfcheck(args) -> int:
     from rmas.pipeline.scan import run_scan
 
@@ -123,6 +207,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="email even on a degraded (synthetic-reddit) run")
     a.set_defaults(func=_cmd_alert)
     sub.add_parser("paper", help="scan + open paper positions").set_defaults(func=_cmd_paper)
+    d = sub.add_parser("doctor", help="probe every live data path with a sample ticker")
+    d.add_argument("--ticker", default="NVDA")
+    d.set_defaults(func=_cmd_doctor)
     sub.add_parser("backtest", help="demo walk-forward backtest").set_defaults(func=_cmd_backtest)
     sub.add_parser("selfcheck", help="end-to-end offline smoke test").set_defaults(func=_cmd_selfcheck)
     return p
