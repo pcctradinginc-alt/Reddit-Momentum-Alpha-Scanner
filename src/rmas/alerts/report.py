@@ -18,7 +18,8 @@ def _plan_block_text(p: TradePlan) -> str:
         f"  Why now    : {r.get('why_now','')}\n"
         f"  Risk       : {r.get('risk','')}\n"
         f"  Exit       : {r.get('exit','')}\n"
-        f"  Edge       : {r.get('edge','')}\n"
+        + (f"  Options    : {r['options']}\n" if r.get("options") else "")
+        + f"  Edge       : {r.get('edge','')}\n"
     )
 
 

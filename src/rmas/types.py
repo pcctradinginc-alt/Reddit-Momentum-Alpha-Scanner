@@ -170,3 +170,6 @@ class TradePlan:
     time_stop_days: int = 0
     expected_edge_bps: float = 0.0
     rationale: dict[str, str] = field(default_factory=dict)
+    # entry-day feature snapshot — feeds the paper-trade outcome log that
+    # will train the meta-labeling model
+    features: dict[str, float] = field(default_factory=dict)

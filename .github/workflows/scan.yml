@@ -116,9 +116,9 @@ jobs:
             rmas --live doctor
           elif [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "DRY RUN — no email will be sent"
-            rmas --live alert --dry-run
+            rmas --live alert --dry-run --paper
           else
-            rmas --live alert
+            rmas --live alert --paper
           fi
 
       - name: Save attention state

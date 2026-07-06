@@ -6,7 +6,7 @@ and a crude IV rank. Falls back to synthetic offline / without a key.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from rmas.config import Secrets, is_offline
 from rmas.data.base import SyntheticOptions
@@ -14,6 +14,34 @@ from rmas.logging_setup import get_logger
 from rmas.types import OptionsSnapshot
 
 log = get_logger("data.tradier")
+
+FLOW_DTE_LO, FLOW_DTE_HI = 20, 45
+
+
+def _pick_expiry(exps: list[str], today: date,
+                 lo: int = FLOW_DTE_LO, hi: int = FLOW_DTE_HI) -> str | None:
+    """Pick the expiration whose flow matters for a 1-10 day momentum hold.
+
+    The NEAREST expiry (old behavior) is often a 0-7 DTE weekly dominated by
+    day-trade lottery volume; positioned money for a swing thesis sits 20-45
+    days out. Fallbacks: first expiry beyond the window, then the furthest
+    available."""
+    parsed: list[tuple[int, str]] = []
+    for e in exps:
+        try:
+            dte = (date.fromisoformat(str(e)) - today).days
+        except ValueError:
+            continue
+        if dte >= 0:
+            parsed.append((dte, str(e)))
+    if not parsed:
+        return None
+    parsed.sort()
+    in_window = [e for dte, e in parsed if lo <= dte <= hi]
+    if in_window:
+        return in_window[0]
+    beyond = [e for dte, e in parsed if dte > hi]
+    return beyond[0] if beyond else parsed[-1][1]
 
 
 class TradierAdapter:
@@ -47,7 +75,11 @@ class TradierAdapter:
             exps = (er.json().get("expirations") or {}).get("date") or []
             if not exps:
                 return self._synthetic.options_snapshot(ticker)
-            expiry = exps[0] if isinstance(exps, list) else exps
+            if not isinstance(exps, list):
+                exps = [exps]
+            expiry = _pick_expiry(exps, datetime.now(timezone.utc).date())
+            if expiry is None:
+                return self._synthetic.options_snapshot(ticker)
 
             ch_url = f"{base}/v1/markets/options/chains"
             cr = requests.get(ch_url, headers=self._headers(),

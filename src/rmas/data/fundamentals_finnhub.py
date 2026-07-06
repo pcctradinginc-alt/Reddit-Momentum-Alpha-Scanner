@@ -78,6 +78,48 @@ class FinnhubFundamentals:
         return (p or {}).get("finnhubIndustry") or None
 
     # ------------------------------------------------------------------ #
+    def next_earnings_in_days(self, ticker: str) -> int | None:
+        """Days until the next scheduled earnings (within 21 days), or None.
+
+        Used to cap the time stop: holding a momentum swing INTO earnings is
+        hidden event risk the sizing never priced."""
+        if not self._live:
+            return None
+        from datetime import timedelta
+
+        today = datetime.now(timezone.utc).date()
+        cached = cache.get("finnhub_earnings", f"{ticker}_{today.isoformat()}")
+        if cached is not None:
+            return cached if cached >= 0 else None
+        try:  # pragma: no cover - live network
+            import requests
+
+            r = requests.get(
+                "https://finnhub.io/api/v1/calendar/earnings",
+                params={"from": today.isoformat(),
+                        "to": (today + timedelta(days=21)).isoformat(),
+                        "symbol": ticker,
+                        "token": self.secrets.get("FINNHUB_API_KEY")},
+                timeout=15,
+            )
+            r.raise_for_status()
+            events = (r.json() or {}).get("earningsCalendar") or []
+            days = None
+            for ev in events:
+                try:
+                    d = (datetime.fromisoformat(ev["date"]).date() - today).days
+                except (KeyError, ValueError):
+                    continue
+                if d >= 0 and (days is None or d < days):
+                    days = d
+            cache.put("finnhub_earnings", f"{ticker}_{today.isoformat()}",
+                      days if days is not None else -1)
+            return days
+        except Exception as exc:  # pragma: no cover
+            log.warning("finnhub earnings calendar failed for %s (%s)", ticker, exc)
+            return None
+
+    # ------------------------------------------------------------------ #
     def metrics(self, ticker: str) -> dict | None:
         """Basic financials (/stock/metric, free tier), cached per day."""
         if not self._live:

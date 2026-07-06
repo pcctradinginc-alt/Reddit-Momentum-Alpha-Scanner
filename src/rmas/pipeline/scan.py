@@ -43,6 +43,7 @@ from rmas.features.discovery import DiscoveryInput, EarlyAttention, build_discov
 from rmas.features.momentum import MomentumInput, build_momentum_features
 from rmas.features.options_flow import build_options_features
 from rmas.features.regime import (
+    Regime,
     RegimeInput,
     RegimeState,
     classify_regime,
@@ -125,6 +126,28 @@ def _hourly_counts(ms: list[Mention], asof: datetime, hours: int = 7,
         if 0 <= age_h < hours:
             buckets[hours - 1 - int(age_h)] += 1
     return buckets
+
+
+def _time_stop_days(regime: RegimeState, cfg: Config,
+                    days_to_earnings: int | None) -> tuple[int, str]:
+    """Regime-aware time stop, capped before the next earnings date.
+
+    Risk-on lets momentum breathe (max), neutral runs shorter, risk-off gets
+    the minimum. Holding a swing INTO earnings is unpriced event risk, so the
+    stop always ends >=1 day before a known earnings date."""
+    lo = int(cfg.risk.get("time_stop_days_min", 2))
+    hi = int(cfg.risk.get("time_stop_days_max", 10))
+    if regime.regime == Regime.RISK_ON:
+        days = hi
+    elif regime.regime == Regime.NEUTRAL:
+        days = max(lo, round((lo + hi) / 2))
+    else:
+        days = lo
+    note = ""
+    if days_to_earnings is not None and 0 < days_to_earnings <= days:
+        days = max(1, days_to_earnings - 1)
+        note = f"Exit BEFORE earnings in {days_to_earnings}d."
+    return days, note
 
 
 def _entry_triggers(mom: dict[str, float]) -> list[str]:
@@ -284,6 +307,12 @@ def run_scan(
         etf = sector_etf(funda.industry(ticker))
         if etf:
             bench_t["SECTOR"] = market.symbol_return(etf)
+            # momentum longs against a falling sector underperform — block
+            # while the sector ETF is below its 20d MA (None = neutral)
+            if (cfg.tradeability.gate.get("require_sector_uptrend", True)
+                    and market.above_ma(etf, 20) is False):
+                rejected["sector_trend"] += 1
+                continue
 
         pm = market.premarket_volumes(ticker)
         minp = MomentumInput(ticker=ticker, bars=bars, benchmark_returns=bench_t,
@@ -433,8 +462,10 @@ def run_scan(
                 rejected["meta_label"] += 1
                 continue
 
+        ts_days, exit_note = _time_stop_days(
+            regime, cfg, funda.next_earnings_in_days(cand.ticker))
         plan = build_trade_plan(cand, ctx, strat,
-                                time_stop_days=cfg.risk.get("time_stop_days_max", 10))
+                                time_stop_days=ts_days, exit_note=exit_note)
         plans.append(plan)
 
     max_alerts = cfg.run.get("max_alerts_per_day", 3)

@@ -75,6 +75,21 @@ def _cmd_alert(args) -> int:
     subject = f"RMAS {tag} — {res.asof:%Y-%m-%d}"
     sent = send_email(subject, text, html, secrets=Secrets(), dry_run=dry_run)
     print(f"[email {'SENT' if sent else 'dry-run / saved to reports/'}]")
+
+    # Feedback loop: mark yesterday's paper positions against real bars and
+    # open today's plans — outcomes.json becomes meta-label training data.
+    if args.paper:
+        from rmas.data.market_alpaca import AlpacaAdapter
+        from rmas.paper.broker import Blotter
+
+        market = AlpacaAdapter(Secrets(), offline=args.offline)
+        blotter = Blotter.load()
+        closed = blotter.update_open(market.daily_bars)
+        opened = 0
+        if res.actionable:
+            opened = sum(1 for p in res.plans if blotter.open_from_plan(p))
+        blotter.save()
+        print(f"[paper] {blotter.summary()} | today: +{opened} opened, {closed} closed")
     return 0
 
 
@@ -227,6 +242,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--dry-run", action="store_true", default=None)
     a.add_argument("--force", action="store_true", default=False,
                    help="email even on a degraded (synthetic-reddit) run")
+    a.add_argument("--paper", action="store_true", default=False,
+                   help="track paper positions (feedback loop for meta-labeling)")
     a.set_defaults(func=_cmd_alert)
     sub.add_parser("paper", help="scan + open paper positions").set_defaults(func=_cmd_paper)
     d = sub.add_parser("doctor", help="probe every live data path with a sample ticker")

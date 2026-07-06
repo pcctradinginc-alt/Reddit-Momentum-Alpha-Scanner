@@ -60,6 +60,7 @@ tradeability:
   gate:
     min_score: 0.55
     require_rel_strength_positive: true
+    require_sector_uptrend: true      # block longs while sector ETF < 20d MA
     max_bid_ask_spread_bps: 60       # reject illiquid
     min_rel_volume: 1.5
     max_iv_rank: 92                   # reject extreme IV overpricing

@@ -132,6 +132,17 @@ class AlpacaAdapter:
             return pct_change(bars[-1 - lookback].close, bars[-1].close)
         return 0.0
 
+    def above_ma(self, symbol: str, window: int = 20) -> bool | None:
+        """Is `symbol` above its `window`-day moving average? None = unknown
+        (not live / not enough bars) — callers must treat None as neutral."""
+        if not self._live:
+            return None
+        bars = self.daily_bars(symbol, window + 10)
+        closes = [b.close for b in bars]
+        if len(closes) < window:
+            return None
+        return closes[-1] > sum(closes[-window:]) / window
+
     def benchmark_returns(self, lookback: int = 20) -> dict[str, float]:
         """Real SPY/QQQ `lookback`-day returns (live) or neutral defaults."""
         if not self._live:

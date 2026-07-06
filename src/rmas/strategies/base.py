@@ -48,7 +48,7 @@ def register(cls):
 
 
 def build_trade_plan(cand: Candidate, ctx: StrategyContext, strat: Strategy,
-                     time_stop_days: int = 7) -> TradePlan:
+                     time_stop_days: int = 7, exit_note: str = "") -> TradePlan:
     """Construct the risk-defined plan + human-readable rationale."""
     entry = ctx.close
     sizing = size_position(
@@ -72,12 +72,21 @@ def build_trade_plan(cand: Candidate, ctx: StrategyContext, strat: Strategy,
     # crude expected edge proxy (bps): blend of gate scores minus a cost drag.
     edge_bps = round((0.4 * disc + 0.35 * trade + 0.25 * timing) * 300 - 20, 1)
 
+    # If the trade is executed with options instead of shares: short-dated
+    # calls are theta destruction for a 1-10 day momentum hold.
+    iv = cand.features.get("_raw_iv_rank", 0.0)
+    opt_note = "If using options: 30-60 DTE, delta 0.6-0.7, exit with >=20 DTE left"
+    if iv and iv > 60:
+        opt_note += f"; IV rank {iv:.0f} is rich -> prefer a debit spread"
+
     rationale = {
         "why_signal": _why_signal(cand),
         "why_tradeable": _why_tradeable(cand),
         "why_now": _why_now(cand),
         "risk": f"Stop {sizing.stop} ({ctx.atr_stop_mult}x ATR), risk ${sizing.risk_usd}",
-        "exit": f"Targets {targets}; time stop {time_stop_days}d; trailing stop on close.",
+        "exit": (f"Targets {targets}; time stop {time_stop_days}d; trailing stop on close."
+                 + (f" {exit_note}" if exit_note else "")),
+        "options": opt_note,
         "edge": f"~{edge_bps} bps expected edge after modeled costs (gate-blended).",
     }
 
@@ -95,6 +104,7 @@ def build_trade_plan(cand: Candidate, ctx: StrategyContext, strat: Strategy,
         time_stop_days=time_stop_days,
         expected_edge_bps=edge_bps,
         rationale=rationale,
+        features=dict(cand.features),
     )
 
 
