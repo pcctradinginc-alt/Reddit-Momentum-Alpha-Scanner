@@ -23,9 +23,10 @@ name: RMAS daily scan
 
 on:
   schedule:
-    # 12:30 UTC, Mon–Fri  (~08:30 US/Eastern in summer — pre-market).
-    # GitHub cron is UTC and may be delayed a few minutes.
-    - cron: "30 12 * * 1-5"
+    # ~12:15 UTC, Mon–Fri (~08:15 US/Eastern in summer — pre-market).
+    # Odd minute on purpose: GitHub delays crons on popular :00/:30 slots
+    # by hours (observed 3.5h on "30 12"); off-peak minutes fire promptly.
+    - cron: "13 12 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
