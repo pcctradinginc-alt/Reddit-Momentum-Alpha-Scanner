@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from rmas.types import TradePlan
 
@@ -84,3 +85,48 @@ def render_html(plans: list[TradePlan], asof: datetime | None = None,
          Few high-quality trades &gt; many FOMO signals.</p>
       {body}
     </body></html>"""
+
+
+def render_heartbeat(res: Any, meta_status: str, forward_summary: str) -> tuple[str, str]:
+    """Liveness email for an actionable-but-0-setups day.
+
+    Without this, ``run.email_when_no_setups=false`` means a perfectly
+    healthy engine that simply found nothing tradeable looks IDENTICAL, from
+    the user's inbox, to a silently broken cron job. This is explicitly NOT
+    a trade signal — it just proves the pipeline ran, ingested real data,
+    and made an honest "no setups today" call, plus the current meta-gate
+    and forward-log status so cold-start progress is visible without
+    running `rmas alpha-report` by hand.
+    """
+    asof = res.asof
+    regime_name = res.regime.regime if res.regime else "?"
+    rejected = dict(res.rejected)
+    rejected_line = ", ".join(f"{k}={v}" for k, v in rejected.items()) or "(none rejected — few candidates reached the gates)"
+
+    text = (
+        f"RMAS heartbeat — engine live, 0 setups — {asof:%Y-%m-%d}\n"
+        + "=" * 64 + "\n"
+        "This is a LIVENESS CONFIRMATION, not a trade signal.\n"
+        "The engine ran end-to-end on real data and found no qualifying setup today.\n\n"
+        f"Regime          : {regime_name}\n"
+        f"Candidates seen : {len(res.candidates)}\n"
+        f"Rejected/gate   : {rejected_line}\n"
+        f"Meta-gate       : {meta_status}\n\n"
+        f"Forward-log maturity:\n{forward_summary}\n"
+    )
+
+    html = f"""<html><body style="background:#fafafa;font-family:Arial">
+      <h2>RMAS heartbeat &mdash; engine live, 0 setups &mdash; {asof:%Y-%m-%d}</h2>
+      <div style="background:#e7f1ff;border:1px solid #7ab0f5;padding:10px;border-radius:6px;color:#1a3d6d">
+        This is a <b>liveness confirmation</b>, not a trade signal. The engine ran
+        end-to-end on real data and found no qualifying setup today.
+      </div>
+      <table style="font-size:13px;margin-top:12px;border-collapse:collapse">
+        <tr><td><b>Regime</b></td><td style="padding-left:8px">{regime_name}</td></tr>
+        <tr><td><b>Candidates seen</b></td><td style="padding-left:8px">{len(res.candidates)}</td></tr>
+        <tr><td><b>Rejected/gate</b></td><td style="padding-left:8px">{rejected_line}</td></tr>
+        <tr><td><b>Meta-gate</b></td><td style="padding-left:8px">{meta_status}</td></tr>
+      </table>
+      <pre style="font-size:12px;background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px">{forward_summary}</pre>
+    </body></html>"""
+    return text, html

@@ -243,10 +243,26 @@ paper-trading+alerts · options flow / catalyst / regime / meta-labeling.
 Plus: full automation (scheduled CI + holiday gate + persisted attention
 history) with live benchmark/regime/liquidity wiring at $0 running cost.
 
-Next: wire real point-in-time historical data for genuine walk-forward research,
-expand catalyst sources (SEC/earnings calendars), and calibrate the meta-label
-model on live forward returns (the meta-label gate stays inactive until a
-trained model is supplied).
+**Alpha engine (live):**
+- **Meta-label gate is now self-activating.** Every closed paper trade lands
+  in `data/state/outcomes.json`; each `rmas alert`/`scan` retrains a
+  dependency-free logistic meta-labeler from that log (`rmas.alpha.meta_gate`)
+  and passes it into the scan. Below `meta_labeling.min_training_samples` (30,
+  both classes required) it reports `WARMING UP` and stays open — an honest
+  cold start — then flips to `ACTIVE` and starts making the final
+  Trade/No-Trade call automatically. No manual model hand-off.
+- **Forward-return logging** (`rmas.alpha.forward_log`): every emitted alert is
+  recorded with its reference entry and gate scores, and real forward returns
+  at 1/3/5/10 trading days are backfilled from Alpaca bars — lookahead-safe (a
+  horizon is filled only once that bar actually exists). This measures raw
+  *signal* quality independent of exit rules. See `rmas alpha-report`.
+- **Heartbeat email**: on an actionable 0-setup day the engine sends a liveness
+  email (`run.daily_heartbeat`) — a healthy "nothing to trade" day no longer
+  looks like a dead cron job. Degraded (synthetic) runs still never email.
+
+Next: wire real point-in-time historical data for genuine walk-forward research
+and expand catalyst sources (SEC/earnings calendars). The meta-label gate now
+calibrates itself from the live paper-trade feedback loop as outcomes accrue.
 
 ## License
 

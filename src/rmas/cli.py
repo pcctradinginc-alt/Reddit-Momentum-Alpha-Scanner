@@ -5,6 +5,8 @@
     rmas paper           run scan + open paper positions for the top setups
     rmas backtest        run the demo walk-forward backtest on synthetic data
     rmas selfcheck       verify the install runs end-to-end offline
+    rmas alpha-report    print forward-return quality + meta-gate status
+    rmas backfill-returns  fill in matured forward-log returns
 
 All commands run offline by default (RMAS_OFFLINE=true) with synthetic data.
 """
@@ -19,10 +21,13 @@ from rmas.logging_setup import setup_logging
 
 
 def _cmd_scan(args) -> int:
+    from rmas.alpha.meta_gate import get_active_model
     from rmas.pipeline.scan import run_scan
 
     cfg = load_config()
-    res = run_scan(cfg=cfg, offline=args.offline)
+    meta_model, meta_status = get_active_model(cfg)
+    print(f"[meta] {meta_status}")
+    res = run_scan(cfg=cfg, offline=args.offline, meta_model=meta_model)
     print(res.summary())
     for p in res.plans:
         print(f"  • {p.ticker} [{p.strategy}] entry={p.entry} stop={p.stop} "
@@ -33,17 +38,24 @@ def _cmd_scan(args) -> int:
 
 
 def decide_dry_run(actionable: bool, n_plans: int, email_when_no_setups: bool,
-                   cli_dry_run: bool | None, force: bool) -> tuple[bool | None, str]:
+                   cli_dry_run: bool | None, force: bool,
+                   daily_heartbeat: bool = False) -> tuple[bool | None, str]:
     """Email policy: (dry_run, reason).
 
+    - cli --dry-run always wins.
     - Degraded (synthetic Reddit) runs never email unless --force.
-    - Empty runs (0 setups) only email when configured — saves inbox noise;
-      the report is always written to reports/ either way.
+    - An actionable 0-setup day sends a liveness HEARTBEAT (not a trade
+      signal) when ``daily_heartbeat`` is on — otherwise a healthy engine
+      that found nothing looks identical, from the inbox, to a dead cron job.
+    - Otherwise empty runs (0 setups) only email when configured — saves
+      inbox noise; the report is always written to reports/ either way.
     """
     if cli_dry_run:
         return True, "cli --dry-run"
     if not actionable and not force:
         return True, "degraded run (reddit synthetic) — forcing dry-run; use --force to email anyway"
+    if actionable and n_plans == 0 and daily_heartbeat and not cli_dry_run:
+        return False, "no setups — sending daily heartbeat"
     if actionable and n_plans == 0 and not email_when_no_setups and not force:
         return True, "no setups today — skipping email (run.email_when_no_setups=false)"
     return cli_dry_run, ""
@@ -51,11 +63,15 @@ def decide_dry_run(actionable: bool, n_plans: int, email_when_no_setups: bool,
 
 def _cmd_alert(args) -> int:
     from rmas.alerts.email_smtp import send_email
-    from rmas.alerts.report import render_html, render_text
+    from rmas.alerts.report import render_heartbeat, render_html, render_text
+    from rmas.alpha import forward_log
+    from rmas.alpha.meta_gate import get_active_model
     from rmas.pipeline.scan import run_scan
 
     cfg = load_config()
-    res = run_scan(cfg=cfg, offline=args.offline)
+    meta_model, meta_status = get_active_model(cfg)
+    print(f"[meta] {meta_status}")
+    res = run_scan(cfg=cfg, offline=args.offline, meta_model=meta_model)
     # Observability: the rejected-per-gate breakdown is what makes threshold
     # tuning from CI logs possible — always print it.
     print(res.summary())
@@ -67,17 +83,15 @@ def _cmd_alert(args) -> int:
         res.actionable, len(res.plans),
         bool(cfg.run.get("email_when_no_setups", False)),
         args.dry_run, args.force,
+        daily_heartbeat=bool(cfg.run.get("daily_heartbeat", False)),
     )
     if reason:
         print(f"[guard] {reason}")
-
-    tag = "TEST" if not res.actionable else f"{len(res.plans)} setup(s)"
-    subject = f"RMAS {tag} — {res.asof:%Y-%m-%d}"
-    sent = send_email(subject, text, html, secrets=Secrets(), dry_run=dry_run)
-    print(f"[email {'SENT' if sent else 'dry-run / saved to reports/'}]")
+    is_heartbeat = reason == "no setups — sending daily heartbeat"
 
     # Feedback loop: mark yesterday's paper positions against real bars and
     # open today's plans — outcomes.json becomes meta-label training data.
+    market = None
     if args.paper:
         from rmas.data.market_alpaca import AlpacaAdapter
         from rmas.paper.broker import Blotter
@@ -90,6 +104,29 @@ def _cmd_alert(args) -> int:
             opened = sum(1 for p in res.plans if blotter.open_from_plan(p))
         blotter.save()
         print(f"[paper] {blotter.summary()} | today: +{opened} opened, {closed} closed")
+
+    # Forward-return logging: raw signal quality at fixed horizons, independent
+    # of the paper blotter's simulated exit rules. Only meaningful on real data.
+    forward_summary = ""
+    if res.actionable:
+        if market is None:
+            from rmas.data.market_alpaca import AlpacaAdapter
+
+            market = AlpacaAdapter(Secrets(), offline=args.offline)
+        n_logged = forward_log.log_scan(res)
+        n_filled = forward_log.backfill(market.daily_bars)
+        print(f"[forward] logged {n_logged} alert(s), backfilled {n_filled} return(s)")
+        forward_summary = forward_log.report()
+
+    if is_heartbeat:
+        text, html = render_heartbeat(res, meta_status, forward_summary or forward_log.report())
+
+    tag = "TEST" if not res.actionable else (
+        "heartbeat" if is_heartbeat else f"{len(res.plans)} setup(s)")
+    subject = (f"RMAS heartbeat — engine live, 0 setups — {res.asof:%Y-%m-%d}" if is_heartbeat
+               else f"RMAS {tag} — {res.asof:%Y-%m-%d}")
+    sent = send_email(subject, text, html, secrets=Secrets(), dry_run=dry_run)
+    print(f"[email {'SENT' if sent else 'dry-run / saved to reports/'}]")
     return 0
 
 
@@ -229,6 +266,27 @@ def _cmd_selfcheck(args) -> int:
     return 0 if ok else 1
 
 
+def _cmd_alpha_report(args) -> int:
+    from rmas.alpha import forward_log
+    from rmas.alpha.meta_gate import get_active_model
+
+    cfg = load_config()
+    _model, meta_status = get_active_model(cfg, refresh=False)
+    print(f"[meta] {meta_status}")
+    print(forward_log.report())
+    return 0
+
+
+def _cmd_backfill(args) -> int:
+    from rmas.alpha import forward_log
+    from rmas.data.market_alpaca import AlpacaAdapter
+
+    market = AlpacaAdapter(Secrets(), offline=args.offline)
+    n_filled = forward_log.backfill(market.daily_bars)
+    print(f"[forward] backfilled {n_filled} return(s)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="rmas", description="Reddit + Momentum Alpha Scanner")
     p.add_argument("--offline", dest="offline", action="store_true", default=None,
@@ -251,6 +309,10 @@ def build_parser() -> argparse.ArgumentParser:
     d.set_defaults(func=_cmd_doctor)
     sub.add_parser("backtest", help="demo walk-forward backtest").set_defaults(func=_cmd_backtest)
     sub.add_parser("selfcheck", help="end-to-end offline smoke test").set_defaults(func=_cmd_selfcheck)
+    sub.add_parser("alpha-report", help="forward-return quality + meta-gate status").set_defaults(
+        func=_cmd_alpha_report)
+    sub.add_parser("backfill-returns", help="fill in matured forward-log returns").set_defaults(
+        func=_cmd_backfill)
     return p
 
 
