@@ -193,7 +193,7 @@ def run_scan(
     reddit = RedditAdapter(secrets, offline=off,
                            min_coverage=cfg.run.get("min_reddit_coverage", 0.5),
                            fetch_comments=cfg.universe.get("fetch_comments_rss", False),
-                           comments_per_sub=cfg.universe.get("comments_per_subreddit", 60),
+                           comments_per_sub=cfg.universe.get("comments_per_subreddit", 25),
                            rss_budget_seconds=cfg.universe.get("rss_budget_seconds", 620))
     market = AlpacaAdapter(secrets, offline=off)
     options = TradierAdapter(secrets, offline=off)

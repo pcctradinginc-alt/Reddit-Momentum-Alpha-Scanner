@@ -27,7 +27,7 @@ universe:
   lookback_long_days: 30
   posts_per_subreddit: 200         # RSS/JSON pagination depth per sub & day
   fetch_comments_rss: true         # supplementary /r/<sub>/comments/.rss pass (no OAuth needed)
-  comments_per_subreddit: 60       # per-sub cap on the comments enrichment pass
+  comments_per_subreddit: 25       # one RSS page/sub — uniform 7/7 comment coverage beats deep-but-partial
   rss_budget_seconds: 620          # wall-clock budget for submissions+comments (CI timeout is 900s)
   min_market_cap_usd: 150_000_000
   min_dollar_volume_usd: 5_000_000
