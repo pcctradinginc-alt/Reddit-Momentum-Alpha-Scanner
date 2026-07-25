@@ -110,6 +110,21 @@ def _assign_tickers(mentions: list[Mention], xcfg: ExtractionConfig) -> list[Men
     return out
 
 
+def _submission_counts(by_ticker: dict[str, list[Mention]]) -> dict[str, int]:
+    """Per-ticker SUBMISSION-ONLY mention counts for the persisted attention
+    history (`AttentionStore`).
+
+    The RSS comments enrichment pass (reddit_source.py) adds `Mention`
+    objects with `is_submission=False` into `by_ticker`. The store's
+    historical baseline was built entirely from submission counts, so
+    counting comments here too would inflate today's number relative to that
+    baseline and fake acceleration in the z-score. Comments still show up
+    honestly via `comments_hourly` (no prior baseline to corrupt) and via the
+    unique-author count (diversity only, its own history starts now).
+    """
+    return {t: sum(1 for m in ms if m.is_submission) for t, ms in by_ticker.items()}
+
+
 def _hourly_counts(ms: list[Mention], asof: datetime, hours: int = 7,
                    submissions: bool = True) -> list[float]:
     """REAL per-hour counts from mention timestamps (oldest -> newest).
@@ -176,7 +191,9 @@ def run_scan(
 
     # ---- adapters ----
     reddit = RedditAdapter(secrets, offline=off,
-                           min_coverage=cfg.run.get("min_reddit_coverage", 0.5))
+                           min_coverage=cfg.run.get("min_reddit_coverage", 0.5),
+                           fetch_comments=cfg.universe.get("fetch_comments_rss", False),
+                           comments_per_sub=cfg.universe.get("comments_per_subreddit", 100))
     market = AlpacaAdapter(secrets, offline=off)
     options = TradierAdapter(secrets, offline=off)
     news = NewsAdapter(secrets, offline=off)
@@ -206,8 +223,12 @@ def run_scan(
     store: AttentionStore | None = None
     if reddit.is_live:
         store = AttentionStore()
+        # Mention count is SUBMISSIONS ONLY — see `_submission_counts` for why
+        # (comment enrichment must not corrupt the historical baseline).
+        # Author count includes commenters: that's fine, it only adds
+        # diversity and its own history baseline starts now.
         store.record(asof.date(),
-                     {t: len(ms) for t, ms in by_ticker.items()},
+                     _submission_counts(by_ticker),
                      {t: len({m.author for m in ms}) for t, ms in by_ticker.items()})
         store.save()
 
@@ -250,6 +271,11 @@ def run_scan(
         else:  # offline demo approximation
             authors_daily = [float(max(1, uniq_authors - 2))] * 6 + [float(uniq_authors)]
 
+        # ApeWisdom same-channel enrichment: richer than our own RSS radar
+        # (includes comments, aggregates many subs) — DISCOVERY input only,
+        # never an independent cross-source channel (see apewisdom_source.py).
+        ape_accel_z = hype.attention_accel_z(ticker, asof.date())
+
         dinp = DiscoveryInput(
             ticker=ticker,
             mentions_daily=mentions_daily,
@@ -259,6 +285,7 @@ def run_scan(
             unique_authors_daily=authors_daily,
             subreddit_count=len({m.subreddit for m in ms}),
             bot_ratio=br,
+            apewisdom_accel=ape_accel_z,
         )
         dfeat = build_discovery_features(dinp,
                                          cfg.universe.get("lookback_short_days", 7),
