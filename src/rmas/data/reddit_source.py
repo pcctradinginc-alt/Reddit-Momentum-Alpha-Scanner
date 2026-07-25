@@ -88,7 +88,8 @@ def _parse_reddit_atom(payload: bytes, sub: str, cutoff: float,
 class RedditAdapter:
     def __init__(self, secrets: Secrets | None = None, offline: bool | None = None,
                  synthetic_tickers: list[str] | None = None, min_coverage: float = 0.5,
-                 fetch_comments: bool = False, comments_per_sub: int = 100):
+                 fetch_comments: bool = False, comments_per_sub: int = 100,
+                 rss_budget_seconds: int = 480):
         self.secrets = secrets or Secrets()
         self.offline = is_offline(self.secrets) if offline is None else offline
         self._synthetic = SyntheticReddit(synthetic_tickers)
@@ -108,6 +109,10 @@ class RedditAdapter:
         # `coverage`/`subs_ok`, which stays submission-based.
         self.fetch_comments = fetch_comments
         self.comments_per_sub = comments_per_sub
+        # Wall-clock budget for the whole RSS pass (submissions first, then the
+        # supplementary comments pass). Sized so BOTH fit for all subs within
+        # the CI job timeout; comments get whatever submissions leave.
+        self.rss_budget_seconds = rss_budget_seconds
 
     @property
     def is_live(self) -> bool:
@@ -298,7 +303,7 @@ class RedditAdapter:
         out: list[Mention] = []
         subs_ok = 0
         first_request = True
-        deadline = time.monotonic() + 480    # hard budget: never blow the CI timeout
+        deadline = time.monotonic() + self.rss_budget_seconds  # hard budget: never blow the CI timeout
         for sub in subreddits:
             if time.monotonic() > deadline:
                 log.warning("reddit rss time budget exhausted before r/%s "
