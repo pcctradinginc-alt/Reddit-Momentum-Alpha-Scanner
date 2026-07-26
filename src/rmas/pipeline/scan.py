@@ -26,7 +26,7 @@ from datetime import datetime
 from rmas.backtest.meta_labeling import MetaLabeler
 from rmas.config import Config, Secrets, is_offline, load_config
 from rmas.data.apewisdom_source import ApeWisdomAdapter
-from rmas.data.attention_store import AttentionStore
+from rmas.data.attention_store import MIN_HISTORY_DAYS, AttentionStore
 from rmas.data.base import synthetic_attention_series
 from rmas.data.fundamentals_finnhub import FinnhubFundamentals
 from rmas.data.market_alpaca import AlpacaAdapter
@@ -75,6 +75,15 @@ class ScanResult:
     rejected: dict[str, int] = field(default_factory=dict)
     reddit_mode: str = "synthetic"      # "oauth" | "public_json" | "rss" | "synthetic"
     market_mode: str = "synthetic"      # "live" | "synthetic"
+    # Observability: names that FAILED the discovery gate but were close,
+    # ranked by discovery score (top 5) — tells us whether the ~200/day
+    # rejects are near-misses (tune the threshold) or nowhere close (leave it).
+    near_misses: list[dict] = field(default_factory=list)
+    # Attention-history maturity, over TODAY's universe only: how many
+    # tickers already have >=MIN_HISTORY_DAYS of persisted history, so a
+    # "0 plans" day can be told apart from "the cache hasn't warmed up yet".
+    attention_tracked: int = 0
+    attention_mature: int = 0
 
     @property
     def actionable(self) -> bool:
@@ -87,10 +96,27 @@ class ScanResult:
 
     def summary(self) -> str:
         flag = "" if self.actionable else "  [DEGRADED: synthetic inputs — NOT actionable]"
-        return (f"asof={self.asof:%Y-%m-%d} regime={self.regime.regime if self.regime else '?'} "
+        line = (f"asof={self.asof:%Y-%m-%d} regime={self.regime.regime if self.regime else '?'} "
                 f"reddit={self.reddit_mode} market={self.market_mode} "
                 f"candidates={len(self.candidates)} plans={len(self.plans)} "
-                f"rejected={dict(self.rejected)}{flag}")
+                f"rejected={dict(self.rejected)} "
+                f"attn={self.attention_mature}/{self.attention_tracked}mature")
+        if self.near_misses:
+            top = self.near_misses[0]
+            line += f" top_miss={top['ticker']}:z{top['z7']}"
+        return line + flag
+
+    def near_miss_lines(self) -> list[str]:
+        """Formatted top-5 discovery near-misses for CLI/heartbeat display."""
+        lines = []
+        for nm in self.near_misses:
+            blockers = "; ".join(nm.get("blockers", []))
+            lines.append(
+                f"{nm['ticker']:<5} score={nm['score']} z7={nm['z7']} "
+                f"ape_z={nm['ape_z']} authors={nm['authors']} mentions={nm['mentions']} "
+                f"[{blockers}]"
+            )
+        return lines
 
 
 def _assign_tickers(mentions: list[Mention], xcfg: ExtractionConfig) -> list[Mention]:
@@ -233,6 +259,17 @@ def run_scan(
                      {t: len({m.author for m in ms}) for t, ms in by_ticker.items()})
         store.save()
 
+    # ---- attention-history maturity, over TODAY's universe only ----
+    attention_tracked = 0
+    attention_mature = 0
+    if store is not None:
+        for t in by_ticker:
+            observed = store.observed_days(t, asof.date())
+            if observed > 0:
+                attention_tracked += 1
+            if observed >= MIN_HISTORY_DAYS:
+                attention_mature += 1
+
     # ---- regime (global): real SPY/QQQ inputs when market data is live ----
     if not off and secrets.alpaca_ready:
         rinp = regime_input_from_bars(market.daily_bars("SPY", 250),
@@ -257,6 +294,8 @@ def run_scan(
         mentions_daily: list[float]
 
     discovered: list[_Disc] = []
+    near_miss_candidates: list[dict] = []
+    min_z7 = cfg.discovery.gate.get("min_mention_z_7d", 1.5)
     for ticker, ms in by_ticker.items():
         today_mentions = len(ms)
         if store is not None:
@@ -294,8 +333,25 @@ def run_scan(
         dgate = score_discovery(dfeat, cfg.discovery)
         if not dgate.green:
             rejected["discovery"] += 1
+            z7 = round(dfeat.get("_raw_mention_z_7d", 0.0), 2)
+            near_miss_candidates.append({
+                "ticker": ticker,
+                "score": round(dgate.score, 3),
+                "z7": z7,
+                "ape_z": round(dfeat.get("_raw_apewisdom_accel_z", 0.0), 2),
+                "authors": int(dfeat.get("_raw_unique_authors", 0)),
+                "mentions": int(today_mentions),
+                "blockers": list(dgate.blockers)[:2],
+            })
+            if z7 >= 0.8 * min_z7:
+                rejected["discovery_near"] += 1
             continue
         discovered.append(_Disc(ticker, ms, dfeat, dgate, mentions_daily))
+
+    # Near-miss digest: top 5 discovery-gate rejects by score, so CI logs show
+    # whether the ~200/day rejects are close calls or nowhere near threshold.
+    near_miss_candidates.sort(key=lambda nm: nm["score"], reverse=True)
+    near_misses = near_miss_candidates[:5]
 
     # Cost cap: only the strongest discovery candidates get (rate-limited)
     # market/options/news calls.
@@ -429,7 +485,8 @@ def run_scan(
     if regime.block_new_longs:
         log.info("regime %s blocks new longs", regime.regime)
         return ScanResult(asof, candidates, [], regime, dict(rejected),
-                          reddit.mode, market.mode)
+                          reddit.mode, market.mode, near_misses,
+                          attention_tracked, attention_mature)
 
     # ---- strategy + blow-off + meta-label + rank ----
     candidates.sort(key=lambda c: c.rank_score, reverse=True)
@@ -499,4 +556,5 @@ def run_scan(
     max_alerts = cfg.run.get("max_alerts_per_day", 3)
     plans = plans[:max_alerts]
     return ScanResult(asof, candidates, plans, regime, dict(rejected),
-                      reddit.mode, market.mode)
+                      reddit.mode, market.mode, near_misses,
+                      attention_tracked, attention_mature)

@@ -82,3 +82,36 @@ def test_render_heartbeat_marks_liveness_not_a_signal():
     assert "WARMING UP" in text
     assert "heartbeat" in html.lower()
     assert "not a trade signal" in html.lower()
+
+
+def test_render_heartbeat_includes_near_misses_and_attention_maturity():
+    from datetime import datetime, timezone
+
+    from rmas.alerts.report import render_heartbeat
+    from rmas.features.regime import Regime, RegimeState
+    from rmas.pipeline.scan import ScanResult
+
+    res = ScanResult(
+        asof=datetime(2026, 7, 24, tzinfo=timezone.utc),
+        candidates=[], plans=[],
+        regime=RegimeState(regime=Regime.NEUTRAL, size_multiplier=1.0,
+                           block_new_longs=False, reasons=[]),
+        rejected={"discovery": 5},
+        reddit_mode="oauth", market_mode="live",
+        near_misses=[
+            {"ticker": "PLTR", "score": 0.54, "z7": 1.31, "ape_z": 0.4,
+             "authors": 7, "mentions": 12, "blockers": ["mention_z_7d=1.31<1.5"]},
+            {"ticker": "SOFI", "score": 0.41, "z7": 0.9, "ape_z": 0.1,
+             "authors": 4, "mentions": 6, "blockers": ["unique_authors=4<5"]},
+        ],
+        attention_tracked=12, attention_mature=8,
+    )
+    text, html = render_heartbeat(res, "meta-label WARMING UP (0/30 outcomes)",
+                                  "forward-log: no records yet.")
+
+    assert "PLTR" in text and "SOFI" in text
+    assert "past cold-start" in text
+    assert "8/12" in text
+    assert "PLTR" in html and "SOFI" in html
+    assert "past cold-start" in html
+    assert "8/12" in html

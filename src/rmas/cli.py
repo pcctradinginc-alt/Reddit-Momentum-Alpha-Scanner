@@ -29,6 +29,8 @@ def _cmd_scan(args) -> int:
     print(f"[meta] {meta_status}")
     res = run_scan(cfg=cfg, offline=args.offline, meta_model=meta_model)
     print(res.summary())
+    for line in res.near_miss_lines():
+        print(f"  [near-miss] {line}")
     for p in res.plans:
         print(f"  • {p.ticker} [{p.strategy}] entry={p.entry} stop={p.stop} "
               f"targets={p.targets} size={p.shares} edge={p.expected_edge_bps}bps")
@@ -75,6 +77,8 @@ def _cmd_alert(args) -> int:
     # Observability: the rejected-per-gate breakdown is what makes threshold
     # tuning from CI logs possible — always print it.
     print(res.summary())
+    for line in res.near_miss_lines():
+        print(f"  [near-miss] {line}")
     text = render_text(res.plans, res.asof, actionable=res.actionable)
     html = render_html(res.plans, res.asof, actionable=res.actionable)
     print(text)

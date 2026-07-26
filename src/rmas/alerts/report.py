@@ -102,6 +102,9 @@ def render_heartbeat(res: Any, meta_status: str, forward_summary: str) -> tuple[
     regime_name = res.regime.regime if res.regime else "?"
     rejected = dict(res.rejected)
     rejected_line = ", ".join(f"{k}={v}" for k, v in rejected.items()) or "(none rejected — few candidates reached the gates)"
+    attention_line = f"{res.attention_mature}/{res.attention_tracked} tickers past cold-start"
+    near_miss_lines = res.near_miss_lines() if hasattr(res, "near_miss_lines") else []
+    near_miss_block = "\n".join(near_miss_lines) if near_miss_lines else "(no discovery near-misses today)"
 
     text = (
         f"RMAS heartbeat — engine live, 0 setups — {asof:%Y-%m-%d}\n"
@@ -111,7 +114,9 @@ def render_heartbeat(res: Any, meta_status: str, forward_summary: str) -> tuple[
         f"Regime          : {regime_name}\n"
         f"Candidates seen : {len(res.candidates)}\n"
         f"Rejected/gate   : {rejected_line}\n"
-        f"Meta-gate       : {meta_status}\n\n"
+        f"Meta-gate       : {meta_status}\n"
+        f"Attention history: {attention_line}\n\n"
+        f"Discovery near-misses (top 5):\n{near_miss_block}\n\n"
         f"Forward-log maturity:\n{forward_summary}\n"
     )
 
@@ -126,7 +131,10 @@ def render_heartbeat(res: Any, meta_status: str, forward_summary: str) -> tuple[
         <tr><td><b>Candidates seen</b></td><td style="padding-left:8px">{len(res.candidates)}</td></tr>
         <tr><td><b>Rejected/gate</b></td><td style="padding-left:8px">{rejected_line}</td></tr>
         <tr><td><b>Meta-gate</b></td><td style="padding-left:8px">{meta_status}</td></tr>
+        <tr><td><b>Attention history</b></td><td style="padding-left:8px">{attention_line}</td></tr>
       </table>
+      <h3 style="font-size:14px;margin-top:14px">Discovery near-misses (top 5)</h3>
+      <pre style="font-size:12px;background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px">{near_miss_block}</pre>
       <pre style="font-size:12px;background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px">{forward_summary}</pre>
     </body></html>"""
     return text, html
