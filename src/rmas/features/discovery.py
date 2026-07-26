@@ -31,6 +31,10 @@ class DiscoveryInput:
     subreddit_count: int = 1                 # distinct subreddits today
     bot_ratio: float = 0.0
     lead_user_weight: float = 0.0            # 0..1 boost from high-quality posters
+    # ApeWisdom's own z-score of mention acceleration (see apewisdom_source.py
+    # attention_accel_z) — same-channel enrichment, richer than our RSS radar
+    # alone (includes comments, aggregates many subs). 0.0 when unknown.
+    apewisdom_accel: float = 0.0
 
 
 def _split(series: Sequence[float]) -> tuple[float, list[float]]:
@@ -82,6 +86,7 @@ def build_discovery_features(inp: DiscoveryInput, short_days: int = 7, long_days
         "unique_authors_z": squash(z_authors, scale=2.0),
         "author_growth": squash(author_growth, scale=1.0),
         "subreddit_diversity": diversity,
+        "apewisdom_accel": squash(inp.apewisdom_accel, scale=2.0),
     }
     # lead-user weighting nudges the strongest attention signals upward.
     if inp.lead_user_weight:
@@ -93,6 +98,7 @@ def build_discovery_features(inp: DiscoveryInput, short_days: int = 7, long_days
     feats["_raw_mention_z_7d"] = z7
     feats["_raw_unique_authors"] = ua_cur
     feats["_raw_bot_ratio"] = inp.bot_ratio
+    feats["_raw_apewisdom_accel_z"] = inp.apewisdom_accel
     return feats
 
 

@@ -37,13 +37,15 @@ _ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _parse_reddit_atom(payload: bytes, sub: str,
-                       cutoff: float) -> tuple[list[Mention], str | None, bool]:
-    """Parse a Reddit ``/new/.rss`` Atom feed page (pure, testable).
+def _parse_reddit_atom(payload: bytes, sub: str, cutoff: float,
+                       is_submission: bool = True) -> tuple[list[Mention], str | None, bool]:
+    """Parse a Reddit ``/new/.rss`` or ``/comments/.rss`` Atom feed page.
 
-    Returns ``(mentions, last_entry_id, reached_cutoff)`` — the last ``t3_*``
-    id feeds the ``after=`` pagination param, ``reached_cutoff`` says an entry
-    older than the lookback window was seen (no point fetching more pages).
+    Pure, testable. Returns ``(mentions, last_entry_id, reached_cutoff)`` —
+    the last entry's id (``t3_*`` for submissions, ``t1_*`` for comments)
+    feeds the ``after=`` pagination param for the NEXT page of the SAME feed,
+    ``reached_cutoff`` says an entry older than the lookback window was seen
+    (no point fetching more pages).
     """
     root = ET.fromstring(payload)
     out: list[Mention] = []
@@ -51,7 +53,7 @@ def _parse_reddit_atom(payload: bytes, sub: str,
     reached_cutoff = False
     for e in root.findall("a:entry", _ATOM_NS):
         eid = e.findtext("a:id", default="", namespaces=_ATOM_NS)
-        if eid.startswith("t3_"):
+        if eid:
             last_id = eid
         updated = e.findtext("a:updated", default="", namespaces=_ATOM_NS)
         try:
@@ -76,7 +78,7 @@ def _parse_reddit_atom(payload: bytes, sub: str,
             created_utc=ts,
             text=f"{title}\n{body}".strip(),
             score=0,                      # not exposed via RSS
-            is_submission=True,
+            is_submission=is_submission,
             permalink=link.get("href", "") if link is not None else "",
             author_age_days=None,         # not exposed via RSS
         ))
@@ -85,7 +87,9 @@ def _parse_reddit_atom(payload: bytes, sub: str,
 
 class RedditAdapter:
     def __init__(self, secrets: Secrets | None = None, offline: bool | None = None,
-                 synthetic_tickers: list[str] | None = None, min_coverage: float = 0.5):
+                 synthetic_tickers: list[str] | None = None, min_coverage: float = 0.5,
+                 fetch_comments: bool = False, comments_per_sub: int = 100,
+                 rss_budget_seconds: int = 480):
         self.secrets = secrets or Secrets()
         self.offline = is_offline(self.secrets) if offline is None else offline
         self._synthetic = SyntheticReddit(synthetic_tickers)
@@ -99,6 +103,16 @@ class RedditAdapter:
         # fake "attention acceleration" in the persisted mention history.
         self.min_coverage = min_coverage
         self.coverage: float = 0.0
+        # Supplementary RSS comments pass (see `_fetch_rss`): gives us a real
+        # comment signal (comments_hourly, unique-commenter diversity)
+        # without OAuth. Comments are enrichment ONLY — they never affect
+        # `coverage`/`subs_ok`, which stays submission-based.
+        self.fetch_comments = fetch_comments
+        self.comments_per_sub = comments_per_sub
+        # Wall-clock budget for the whole RSS pass (submissions first, then the
+        # supplementary comments pass). Sized so BOTH fit for all subs within
+        # the CI job timeout; comments get whatever submissions leave.
+        self.rss_budget_seconds = rss_budget_seconds
 
     @property
     def is_live(self) -> bool:
@@ -246,8 +260,12 @@ class RedditAdapter:
         return out, subs_ok
 
     def _get_rss_page(self, sub: str, after: str | None,
-                      limit: int) -> bytes | None:
-        """One RSS page with 429 backoff. Separated for testability."""
+                      limit: int, feed: str = "new") -> bytes | None:
+        """One RSS page with 429 backoff. Separated for testability.
+
+        `feed` selects the Atom feed: "new" for submissions, "comments" for
+        the newest comments in the subreddit (``/r/<sub>/comments/.rss``).
+        """
         try:  # pragma: no cover - requires live network
             import requests
         except Exception:
@@ -259,15 +277,15 @@ class RedditAdapter:
         r = None
         for attempt in range(3):  # pragma: no cover - live network
             r = requests.get(
-                f"https://www.reddit.com/r/{sub}/new/.rss",
+                f"https://www.reddit.com/r/{sub}/{feed}/.rss",
                 headers={"User-Agent": ua}, params=params, timeout=15,
             )
             if r.status_code != 429:
                 break
             time.sleep(20 * (attempt + 1))   # 429: back off and retry
         if r is None or r.status_code != 200:  # pragma: no cover
-            log.warning("reddit rss %s on r/%s",
-                        r.status_code if r is not None else "?", sub)
+            log.warning("reddit rss %s on r/%s/%s",
+                        r.status_code if r is not None else "?", sub, feed)
             return None
         return r.content  # pragma: no cover
 
@@ -285,7 +303,7 @@ class RedditAdapter:
         out: list[Mention] = []
         subs_ok = 0
         first_request = True
-        deadline = time.monotonic() + 480    # hard budget: never blow the CI timeout
+        deadline = time.monotonic() + self.rss_budget_seconds  # hard budget: never blow the CI timeout
         for sub in subreddits:
             if time.monotonic() > deadline:
                 log.warning("reddit rss time budget exhausted before r/%s "
@@ -319,4 +337,47 @@ class RedditAdapter:
             return None
         log.info("reddit: RSS (no-auth) mode, %d posts from %d subs",
                  len(out), subs_ok)
+
+        # ---- supplementary comments pass (enrichment only) ---------------- #
+        # Feeds comments_hourly / unique-commenter diversity in DISCOVERY.
+        # CRITICAL: this must never change `subs_ok`/coverage (which stays
+        # submission-based) and any failure here must be swallowed — a dead
+        # comments feed can never degrade the run or drop the submissions
+        # already gathered above.
+        if self.fetch_comments:
+            if time.monotonic() > deadline:
+                log.info("reddit rss comments: time budget already exhausted "
+                         "after submissions; skipping comments entirely")
+            else:
+                for sub in subreddits:
+                    if time.monotonic() > deadline:
+                        log.info("reddit rss comments: time budget exhausted "
+                                 "before r/%s", sub)
+                        break
+                    try:
+                        after = None
+                        fetched = 0
+                        while (fetched < self.comments_per_sub
+                               and time.monotonic() <= deadline):
+                            if not first_request:
+                                time.sleep(8)         # same spacing as submissions
+                            first_request = False
+                            payload = self._get_rss_page(
+                                sub, after, self.comments_per_sub - fetched,
+                                feed="comments")
+                            if payload is None:
+                                break
+                            mentions, last_id, reached_cutoff = _parse_reddit_atom(
+                                payload, sub, cutoff, is_submission=False)
+                            out.extend(mentions)
+                            fetched += max(len(mentions), 1)
+                            if reached_cutoff or not mentions or last_id is None:
+                                break
+                            after = last_id
+                    except Exception as exc:  # pragma: no cover - defensive
+                        log.warning("reddit rss comments failed on r/%s (%s) — "
+                                    "supplementary only, submissions unaffected",
+                                    sub, exc)
+                        continue
+
         return out, subs_ok

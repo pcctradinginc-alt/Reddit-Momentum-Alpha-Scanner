@@ -26,6 +26,9 @@ universe:
   lookback_short_days: 7
   lookback_long_days: 30
   posts_per_subreddit: 200         # RSS/JSON pagination depth per sub & day
+  fetch_comments_rss: true         # supplementary /r/<sub>/comments/.rss pass (no OAuth needed)
+  comments_per_subreddit: 25       # one RSS page/sub — uniform 7/7 comment coverage beats deep-but-partial
+  rss_budget_seconds: 620          # wall-clock budget for submissions+comments (CI timeout is 900s)
   min_market_cap_usd: 150_000_000
   min_dollar_volume_usd: 5_000_000
 
@@ -40,12 +43,20 @@ discovery:
     unique_authors_z: 0.10
     author_growth: 0.07
     subreddit_diversity: 0.05
+    # NOTE: apewisdom_accel is deliberately NOT a normalized score weight.
+    # weighted_score divides by the sum of ALL weights, so giving it weight
+    # would haircut every ticker ApeWisdom doesn't cover — i.e. exactly the
+    # early, not-yet-popular names the strategy targets (they aren't in
+    # ApeWisdom's top-100 yet). Its value is delivered purely through the
+    # OR-gate below (use_apewisdom_accel), which only ever HELPS a ticker pass.
   gate:
     min_score: 0.60
     min_mention_z_7d: 1.5        # "unusually discussed"
     min_unique_authors: 5
     max_bot_ratio: 0.45          # reject astroturf
     require_early: true          # prefer rising-but-not-yet-mainstream
+    use_apewisdom_accel: true    # OR-gate: ApeWisdom accel can also satisfy early-attention
+    min_apewisdom_accel_z: 1.5
 
 # ---- Tradeability gate (price/volume/options confirmation) ----
 tradeability:
